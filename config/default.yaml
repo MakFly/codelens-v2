@@ -1,0 +1,46 @@
+# CodeLens default configuration
+# Override with environment variables: CODELENS_<KEY>
+# Or with flags: codelens --ollama-model mxbai-embed-large
+
+project: "."
+db: ".codelens/index.db"
+
+ollama:
+  url: "http://localhost:11434"
+  model: "nomic-embed-text"   # 768 dims, fast, good for code
+  # Alternative: "mxbai-embed-large" (1024 dims, better quality, slower)
+  timeout_seconds: 30
+  max_concurrent: 4           # Parallel embedding requests
+
+indexer:
+  extensions:
+    - .php
+    - .ts
+    - .tsx
+    - .js
+    - .jsx
+    - .go
+    - .py
+    - .java
+    - .rs
+  exclude_dirs:
+    - vendor
+    - node_modules
+    - .git
+    - dist
+    - build
+    - .codelens
+    - coverage
+  chunk_min_lines: 10
+  chunk_max_lines: 150
+  chunk_overlap_lines: 3
+
+memory:
+  ttl_days: 28
+  max_active: 500             # Max memories to keep before pruning oldest
+
+hook:
+  large_file_threshold: 400   # Lines above which Read is intercepted
+  intercept_grep: true
+  intercept_read: true
+  intercept_glob: false       # Glob interception is suggestive only

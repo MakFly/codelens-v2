@@ -1,0 +1,9 @@
+{
+  "running": false,
+  "pid": 0,
+  "project": "/Users/kev/Documents/cowork/codelens-v2",
+  "started_at": "2026-02-23T20:04:04.775399+01:00",
+  "last_cycle_at": "2026-02-23T20:04:12.24362+01:00",
+  "last_cycle_duration_ms": 3,
+  "interval": "5s"
+}
