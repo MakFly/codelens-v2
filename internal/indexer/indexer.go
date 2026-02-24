@@ -12,8 +12,10 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/fsnotify/fsnotify"
 	"github.com/yourusername/codelens/internal/embeddings"
 	"github.com/yourusername/codelens/internal/store"
 )
@@ -146,6 +148,10 @@ func (i *Indexer) IndexAll(ctx context.Context, force bool) (*IndexStats, error)
 		if err != nil {
 			return err
 		}
+
+		if isFileBeingWritten(path) {
+			return nil
+		}
 		content := string(contentBytes)
 		fileHash := hashString(content)
 
@@ -263,16 +269,92 @@ func (i *Indexer) embedChunkWithFallback(ctx context.Context, chunk Chunk) ([]em
 }
 
 func (i *Indexer) Watch(ctx context.Context) error {
-	ticker := time.NewTicker(5 * time.Second)
-	defer ticker.Stop()
+	watcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		return fmt.Errorf("create watcher: %w", err)
+	}
+	defer watcher.Close()
+
+	var watchMu sync.Mutex
+	watchedDirs := make(map[string]bool)
+
+	addWatchRecursive := func(path string) error {
+		return filepath.WalkDir(path, func(wp string, d fs.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if d.IsDir() {
+				rel, relErr := filepath.Rel(i.projectRoot, wp)
+				if relErr != nil {
+					return relErr
+				}
+				if shouldSkipDir(rel) {
+					return filepath.SkipDir
+				}
+				watchMu.Lock()
+				if !watchedDirs[wp] {
+					watchedDirs[wp] = true
+					watchMu.Unlock()
+					if addErr := watcher.Add(wp); addErr != nil {
+						return addErr
+					}
+				} else {
+					watchMu.Unlock()
+				}
+			}
+			return nil
+		})
+	}
+
+	if err := addWatchRecursive(i.projectRoot); err != nil {
+		return fmt.Errorf("add watch: %w", err)
+	}
+
+	var cycleMu sync.Mutex
+	var cycleRunning bool
+
+	runCycle := func() {
+		cycleMu.Lock()
+		if cycleRunning {
+			cycleMu.Unlock()
+			return
+		}
+		cycleRunning = true
+		cycleMu.Unlock()
+
+		defer func() {
+			cycleMu.Lock()
+			cycleRunning = false
+			cycleMu.Unlock()
+		}()
+
+		if _, err := i.IndexAll(ctx, false); err != nil {
+			fmt.Fprintf(os.Stderr, "index cycle error: %v\n", err)
+		}
+	}
+
+	debounce := time.NewTimer(500 * time.Millisecond)
+	debounce.Stop()
 
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-ticker.C:
-			if _, err := i.IndexAll(ctx, false); err != nil {
-				return err
+		case event := <-watcher.Events:
+			if event.Op&(fsnotify.Write|fsnotify.Create|fsnotify.Remove|fsnotify.Rename) != 0 {
+				if !debounce.Stop() {
+					select {
+					case <-debounce.C:
+					default:
+					}
+				}
+				debounce.Reset(500 * time.Millisecond)
+			}
+		case <-debounce.C:
+			go runCycle()
+		case err := <-watcher.Errors:
+			if err != nil {
+				return fmt.Errorf("watcher error: %w", err)
 			}
 		}
 	}
@@ -475,6 +557,20 @@ func shouldSkipDir(rel string) bool {
 		if strings.HasPrefix(lower, p) {
 			return true
 		}
+	}
+	return false
+}
+
+func isFileBeingWritten(path string) bool {
+	if os.Getenv("CODELENS_SKIP_LOCK_CHECK") == "1" {
+		return false
+	}
+	fi, err := os.Stat(path)
+	if err != nil {
+		return false
+	}
+	if time.Since(fi.ModTime()) < 500*time.Millisecond {
+		return true
 	}
 	return false
 }

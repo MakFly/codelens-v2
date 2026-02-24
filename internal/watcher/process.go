@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -32,6 +33,9 @@ type Status struct {
 func Start(cfg Config) (int, error) {
 	if cfg.Interval <= 0 {
 		cfg.Interval = 5 * time.Second
+	}
+	if err := cleanupStaleState(cfg); err != nil {
+		return 0, fmt.Errorf("cleanup stale state: %w", err)
 	}
 	if err := os.MkdirAll(filepath.Dir(cfg.PIDFile), 0755); err != nil {
 		return 0, err
@@ -173,6 +177,22 @@ func IsAlive(pid int) bool {
 	return err == nil
 }
 
+func cleanupStaleState(cfg Config) error {
+	state, err := loadState(cfg.StateFile)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	if state.Running && state.PID > 0 && !IsAlive(state.PID) {
+		state.Running = false
+		state.PID = 0
+		return saveState(cfg.StateFile, state)
+	}
+	return nil
+}
+
 func safeLoadState(stateFile string) (State, error) {
 	state, err := loadState(stateFile)
 	if err == nil {
@@ -188,10 +208,16 @@ func Run(ctx context.Context, cfg Config, runOnce func(context.Context, Config) 
 	if cfg.Interval <= 0 {
 		cfg.Interval = 5 * time.Second
 	}
+	if err := cleanupStaleState(cfg); err != nil {
+		return fmt.Errorf("cleanup stale state: %w", err)
+	}
 	if err := writePID(cfg.PIDFile, os.Getpid()); err != nil {
 		return err
 	}
 	defer func() { _ = removePID(cfg.PIDFile) }()
+
+	var cycleMu sync.Mutex
+	var cycleRunning bool
 
 	state := State{
 		Running:   true,
@@ -219,6 +245,26 @@ func Run(ctx context.Context, cfg Config, runOnce func(context.Context, Config) 
 		_ = saveState(cfg.StateFile, state)
 	}
 
+	runCycle := func() {
+		cycleMu.Lock()
+		if cycleRunning {
+			cycleMu.Unlock()
+			return
+		}
+		cycleRunning = true
+		cycleMu.Unlock()
+
+		defer func() {
+			cycleMu.Lock()
+			cycleRunning = false
+			cycleMu.Unlock()
+		}()
+
+		started := time.Now()
+		files, chunks, err := runOnce(ctx, cfg)
+		update(files, chunks, err, started)
+	}
+
 	cycleCfg := cfg
 	started := time.Now()
 	files, chunks, err := runOnce(ctx, cycleCfg)
@@ -236,9 +282,7 @@ func Run(ctx context.Context, cfg Config, runOnce func(context.Context, Config) 
 			_ = saveState(cfg.StateFile, state)
 			return ctx.Err()
 		case <-ticker.C:
-			started := time.Now()
-			files, chunks, err := runOnce(ctx, cycleCfg)
-			update(files, chunks, err, started)
+			go runCycle()
 		}
 	}
 }

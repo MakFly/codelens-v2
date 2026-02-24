@@ -50,28 +50,65 @@ Three complementary layers:
 ## Quick Start
 
 ```bash
-# 1. Clone and build
+# 1. Clone
 git clone https://github.com/MakFly/codelens-v2
 cd codelens-v2
-make build
-make install
 
-# 2. Start Ollama (for embeddings)
+# 2. Run the installation script
+# Auto-detects installed AI clients and configures them
+./scripts/install.sh /path/to/your/project
+
+# 3. Start Ollama (for embeddings)
 ollama serve
 ollama pull nomic-embed-text
 
-# 3. Index your project
+# 4. Index your project
+cd /path/to/your/project
+~/.local/bin/codelens index .
+
+# 5. Check index stats
+~/.local/bin/codelens stats
+
+# 6. Start the watcher (optional, manual)
+~/.local/bin/codelens watcher start /path/to/your/project
+
+# 7. Restart your AI client
+claude  # or: opencode, gemini, codex
+```
+
+### Supported AI Clients (auto-detected)
+
+The installer automatically detects and configures:
+
+| Client | Config File | MCP | Hooks |
+|--------|-------------|-----|-------|
+| Claude Code | `~/.claude/settings.json` | ✅ | ✅ |
+| OpenCode | `~/.config/opencode/opencode.json` | ✅ | ❌ |
+| Codex | `~/.codex/config.toml` | ✅ | ❌ |
+| Gemini CLI | `~/.gemini/settings.json` | ✅ | ❌ |
+
+If a client is not installed, it will be skipped automatically.
+
+### Manual Installation
+
+If you prefer to install manually:
+
+```bash
+# Build binaries
+cd codelens-v2
+go build -o codelens ./cmd/codelens/
+go build -o codelens-hook ./cmd/hook/
+
+# Install to PATH
+mkdir -p ~/.local/bin
+cp codelens codelens-hook ~/.local/bin/
+export PATH=$HOME/.local/bin:$PATH
+
+# Index your project
 cd /path/to/your/project
 codelens index .
 
-# 4. Check index stats
-codelens stats
-
-# 5. Configure Claude Code
-cp /path/to/codelens-v2/.claude/settings.json /path/to/your/project/.claude/settings.json
-
-# 6. Open Claude Code — CodeLens starts automatically
-claude
+# Configure clients manually - see scripts/install.sh for reference
 ```
 
 ## MCP Tools
@@ -134,7 +171,7 @@ await publish_memory({ proposal_id: "prop_abc123" });
 
 ## Watcher Daemon
 
-Keep your index up-to-date automatically:
+Keep your index up-to-date automatically with real-time file system watching:
 
 ```bash
 # Start daemon (runs in background)
@@ -147,33 +184,25 @@ codelens watcher status .
 codelens watcher stop .
 ```
 
+### Features
+
+- **Real-time file watching** — Uses `fsnotify` for immediate reactivity (no polling)
+- **Concurrent cycle protection** — Mutex prevents overlapping index cycles
+- **Stale state recovery** — Automatically cleans up stale state after crashes or system restarts
+- **File lock detection** — Skips files being actively modified by editors (Cursor, VSCode, etc.)
+
+### Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `CODELENS_SKIP_LOCK_CHECK` | `false` | Set to `1` to disable file lock detection |
+
 ## Architecture
 
 ```
 ┌─────────────────────────┐
-│   Claude Code / Agent  │
-└───────────┬─────────────┘
-            │ MCP Protocol
-┌───────────▼─────────────┐
-│   CodeLens MCP Server  │
-│  - search_codebase()   │
-│  - read_file_smart()  │
-│  - remember/recall()   │
-└───────────┬─────────────┘
-            │
-    ┌───────┴───────┐
-    ▼               ▼
-┌────────┐    ┌────────────┐
-│ Vector │    │   Memory   │
-│ Index  │    │   Store    │
-│ (HNSW) │    │  (SQLite)  │
-└────────┘    └────────────┘
-    │               │
-    └───────┬───────┘
-            ▼
-┌─────────────────────────┐
-│    Indexer + Watcher    │
-│   (tree-sitter chunker) │
+│    Indexer + Watcher   │
+│   (fsnotify + chunker) │
 └─────────────────────────┘
 ```
 
@@ -185,6 +214,7 @@ codelens watcher stop .
 - **SQLite** — Persistent storage for chunks and memories
 - **HNSW** — In-memory vector index for semantic search
 - **tree-sitter** — AST-aware code chunking (PHP, TypeScript, Go, Python)
+- **fsnotify** — Real-time file system watching
 
 ## Running Tests
 
@@ -206,6 +236,9 @@ make bench
 | `CODELENS_OLLAMA_URL` | `http://localhost:11434` | Ollama server URL |
 | `CODELENS_OLLAMA_MODEL` | `nomic-embed-text` | Embedding model |
 | `CODELENS_TOOL_TIMEOUT` | `20s` | MCP tool timeout |
+| `CODELENS_SKIP_LOCK_CHECK` | `false` | Skip file lock detection (set to `1`) |
+| `CODELENS_MEMORY_AUTO_PUBLISH` | `true` | Auto-publish memories without manual review |
+| `CODELENS_SNIPPET_CHARS` | `700` | Max characters per search result snippet |
 
 ### YAML Config
 
@@ -226,6 +259,78 @@ watcher:
     - "*.git/*"
     - "node_modules/*"
     - "vendor/*"
+```
+
+## Troubleshooting
+
+### "command not found: codelens"
+
+Add to your shell profile (`~/.zshrc` or `~/.bashrc`):
+```bash
+export PATH=$HOME/.local/bin:$PATH
+```
+
+Then restart your shell or run: `source ~/.zshrc`
+
+### "MCP server failed to start"
+
+Check that:
+1. Ollama is running: `ollama serve`
+2. The model is installed: `ollama list` (should show `nomic-embed-text`)
+3. The database exists: `ls -la .codelens/index.db`
+
+Try starting manually to see errors:
+```bash
+codelens serve
+```
+
+### "No results from search_codebase"
+
+Re-index your project:
+```bash
+codelens index . --force
+```
+
+Check index stats:
+```bash
+codelens stats
+```
+
+### Watcher not updating index
+
+Check watcher status:
+```bash
+codelens watcher status .
+```
+
+Check watcher logs:
+```bash
+tail -f .codelens/watcher.log
+```
+
+### Claude Code not using CodeLens tools
+
+Verify settings.json is correct:
+```bash
+cat ~/.claude/settings.json | jq '.mcpServers'
+```
+
+Should show:
+```json
+{
+  "codelens": {
+    "command": "/home/user/.local/bin/codelens",
+    "args": ["serve"],
+    ...
+  }
+}
+```
+
+### File lock errors
+
+If you see file lock errors, you can disable lock checking:
+```bash
+CODELENS_SKIP_LOCK_CHECK=1 codelens index .
 ```
 
 ## License

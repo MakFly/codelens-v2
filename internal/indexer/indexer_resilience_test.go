@@ -44,6 +44,7 @@ func (e *lengthLimitedEmbedder) Dimensions() int   { return 3 }
 func (e *lengthLimitedEmbedder) ModelName() string { return "test" }
 
 func TestIndexAll_SplitsChunksOnContextOverflow(t *testing.T) {
+	t.Setenv("CODELENS_SKIP_LOCK_CHECK", "1")
 	tmp := t.TempDir()
 	db, err := store.Open(filepath.Join(tmp, ".codelens", "index.db"))
 	require.NoError(t, err)
@@ -66,6 +67,7 @@ func TestIndexAll_SplitsChunksOnContextOverflow(t *testing.T) {
 }
 
 func TestIndexAll_RecordsAndSkipsFailures(t *testing.T) {
+	t.Setenv("CODELENS_SKIP_LOCK_CHECK", "1")
 	tmp := t.TempDir()
 	db, err := store.Open(filepath.Join(tmp, ".codelens", "index.db"))
 	require.NoError(t, err)
@@ -86,4 +88,3 @@ func TestIndexAll_RecordsAndSkipsFailures(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 1, dbStats.FailedFiles)
 }
-
