@@ -2,24 +2,6 @@
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "*",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "codelens-hook enforce"
-          }
-        ]
-      },
-      {
-        "matcher": "*",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "codelens-hook memory"
-          }
-        ]
-      },
-      {
         "matcher": "Bash",
         "hooks": [
           {
