@@ -39,14 +39,14 @@ install_codelens() {
 
     mkdir -p "$INSTALL_DIR"
 
-    archive="codelens_${ver}_${os}_${arch}.tar"
+    archive="codelens_${ver}_${os}_${arch}.tar.gz"
     url="https://github.com/${REPO}/releases/download/v${ver}/${archive}"
 
     echo "Downloading: $url"
-    curl -sL "$url" -o "/tmp/codelens.tar"
+    curl -sL "$url" -o "/tmp/codelens.tar.gz"
 
-    tar -xf "/tmp/codelens.tar" -C "$INSTALL_DIR"
-    rm -f "/tmp/codelens.tar"
+    tar -xzf "/tmp/codelens.tar.gz" -C "$INSTALL_DIR"
+    rm -f "/tmp/codelens.tar.gz"
 
     chmod +x "$INSTALL_DIR/codelens"
     [ -f "$INSTALL_DIR/codelens-hook" ] && chmod +x "$INSTALL_DIR/codelens-hook"
