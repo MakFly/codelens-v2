@@ -24,59 +24,225 @@ import (
 var rootCmd = &cobra.Command{
 	Use:   "codelens",
 	Short: "Agentic memory & semantic search MCP server for Claude Code",
+	Long: `CodeLens - Agentic Memory & Semantic Search
+
+A tool that provides Claude Code with semantic search over your codebase
+and persistent memory for team insights.
+
+Quick Start:
+  codelens index .                    # Index current project
+  codelens serve                      # Start MCP server (stdio)
+  codelens stats                     # Show index statistics
+  codelens watcher start .           # Start background watcher
+
+Environment Variables:
+  CODELENS_OLLAMA_URL       Ollama server URL (default: http://localhost:11434)
+  CODELENS_OLLAMA_MODEL     Embedding model (default: nomic-embed-text)
+  CODELENS_DB              SQLite database path (default: .codelens/index.db)
+  CODELENS_PROJECT         Project root directory (default: .)
+
+For more help, see: https://github.com/MakFly/codelens-v2`,
 }
 
 var serveCmd = &cobra.Command{
 	Use:   "serve",
 	Short: "Start the MCP server (stdio transport)",
-	RunE:  runServe,
+	Long: `Start the CodeLens MCP server using stdio transport.
+
+This command is typically used by AI clients (Claude Code, OpenCode, etc.)
+via MCP configuration. It starts a long-running server that listens for
+JSON-RPC requests on stdio.
+
+The server exposes these MCP tools:
+  - search_codebase   Semantic search over indexed code
+  - read_file_smart   Read file sections with context
+  - remember          Store insights in team memory
+  - recall            Retrieve relevant memories
+  - propose_memory    Create memory proposals for review
+  - publish_memory    Publish approved memories
+  - index_status      Get current index state
+
+Example:
+  codelens serve
+
+For Claude Code integration, use the included installer or manually
+configure ~/.claude/settings.json with the MCP server.`,
+	RunE: runServe,
 }
 
 var indexCmd = &cobra.Command{
 	Use:   "index [path]",
-	Short: "Index a project directory",
-	Args:  cobra.MaximumNArgs(1),
-	RunE:  runIndex,
+	Short: "Index a project directory for semantic search",
+	Long: `Index a project directory to enable semantic search and code analysis.
+
+This command scans all source files in the specified directory, splits them
+into semantic chunks using tree-sitter, and generates embeddings using Ollama.
+
+The indexer automatically skips:
+  - Hidden directories (.git, .codelens, etc.)
+  - Dependencies (node_modules, vendor, etc.)
+  - Build artifacts (*.pyc, *.o, etc.)
+  - Binary files and large files
+
+Indexing Process:
+  1. Walk directory tree (respects skip patterns)
+  2. Detect language and parse with tree-sitter
+  3. Split into semantic chunks (functions, classes, etc.)
+  4. Generate embeddings via Ollama
+  5. Store in SQLite + HNSW index
+
+The --force flag re-indexes all files even if unchanged.
+The --watch flag starts file watching after initial index.
+
+Examples:
+  codelens index .                         # Index current directory
+  codelens index /path/to/project          # Index specific path
+  codelens index . --force                 # Force re-index all files
+  codelens index . --watch                 # Index and watch for changes`,
+	Args: cobra.MaximumNArgs(1),
+	RunE: runIndex,
 }
 
 var searchCmd = &cobra.Command{
 	Use:   "search [query]",
-	Short: "Search the codebase (CLI test)",
-	Args:  cobra.ExactArgs(1),
-	RunE:  runSearch,
+	Short: "Search the codebase using semantic similarity",
+	Long: `Search the indexed codebase using natural language queries.
+
+This command performs semantic search using vector similarity. It converts
+your query into an embedding and finds the most relevant code chunks.
+
+The search returns:
+  - File path and line numbers
+  - Similarity score (0-1, higher is better)
+  - Code symbol info (function, class, etc.)
+  - Content snippet
+
+Examples:
+  codelens search "authentication logic"
+  codelens search "database connection setup"
+  codelens search "user validation function"
+
+Tips:
+  - Use natural language, not just keywords
+  - Be specific: "login handler" vs "auth"
+  - Include context: "React useState hook"`,
+	Args: cobra.ExactArgs(1),
+	RunE: runSearch,
 }
 
 var statsCmd = &cobra.Command{
 	Use:   "stats",
-	Short: "Show index statistics",
-	RunE:  runStats,
+	Short: "Show index statistics and health",
+	Long: `Display statistics about the current project index.
+
+Shows:
+  - Total indexed files
+  - Total code chunks
+  - Number of failed files
+  - Active team memories
+  - Last index timestamp
+  - Database location
+
+Use this to verify indexing completed successfully and to monitor
+index health over time.`,
+	RunE: runStats,
 }
 
 var watcherCmd = &cobra.Command{
 	Use:   "watcher",
-	Short: "Manage background index watcher",
-	RunE:  runWatcherAuto,
+	Short: "Manage background file watcher daemon",
+	Long: `Manage a background daemon that watches for file changes and
+automatically updates the index.
+
+The watcher monitors your project directory in real-time using fsnotify
+and triggers incremental re-indexing when files change. This ensures
+your semantic search index stays up-to-date without manual intervention.
+
+Commands:
+  start     Start watcher daemon in background
+  stop      Stop running watcher daemon
+  status    Show watcher status (running/stopped)
+
+The watcher runs as a background process and persists its PID to a file.
+It includes:
+  - Real-time file watching (fsnotify, no polling)
+  - Concurrent cycle protection (mutex)
+  - Stale state recovery after crashes
+  - File lock detection (skip files being edited)
+  - Debounced updates (500ms)
+
+Examples:
+  codelens watcher start .                # Start watcher for current project
+  codelens watcher start /path/to/proj   # Start watcher for specific project
+  codelens watcher stop                   # Stop all watchers
+  codelens watcher status                 # Show all watcher statuses
+
+Environment Variables:
+  CODELENS_SKIP_LOCK_CHECK   Set to "1" to disable file lock detection`,
+	RunE: runWatcherAuto,
 }
 
 var watcherStartCmd = &cobra.Command{
 	Use:   "start [path]",
 	Short: "Start watcher daemon in background",
-	Args:  cobra.MaximumNArgs(1),
-	RunE:  runWatcherStart,
+	Long: `Start the background watcher daemon for a project.
+
+The watcher will:
+  - Run in background (detached process)
+  - Monitor files using fsnotify (real-time)
+  - Trigger index updates on file changes
+  - Log to .codelens/watcher.log
+
+Without arguments, starts watchers for all discovered indexed projects.
+
+With a path argument, starts watcher for that specific project.
+
+Examples:
+  codelens watcher start .                     # Start for current dir
+  codelens watcher start /path/to/project     # Start for specific path
+  codelens watcher start . --interval 10s      # Custom interval`,
+	Args: cobra.MaximumNArgs(1),
+	RunE: runWatcherStart,
 }
 
 var watcherStopCmd = &cobra.Command{
 	Use:   "stop [path]",
-	Short: "Stop watcher daemon",
-	Args:  cobra.MaximumNArgs(1),
-	RunE:  runWatcherStop,
+	Short: "Stop watcher daemon(s)",
+	Long: `Stop the running watcher daemon.
+
+Without arguments, stops all watchers found in the user's home directory.
+With a path argument, stops the watcher for that specific project.
+
+The command sends SIGTERM to the watcher process and cleans up PID files.
+
+Examples:
+  codelens watcher stop              # Stop all watchers
+  codelens watcher stop .           # Stop watcher for current dir
+  codelens watcher stop /path/proj  # Stop specific watcher`,
+	Args: cobra.MaximumNArgs(1),
+	RunE: runWatcherStop,
 }
 
 var watcherStatusCmd = &cobra.Command{
 	Use:   "status [path]",
 	Short: "Show watcher daemon status",
-	Args:  cobra.MaximumNArgs(1),
-	RunE:  runWatcherStatus,
+	Long: `Display the current status of watcher daemon(s).
+
+Shows detailed state including:
+  - Running status (true/false)
+  - Process ID
+  - Last cycle timestamp
+  - Files/chunks indexed
+  - Any errors
+
+Without arguments, shows status for all discovered projects.
+With a path, shows status for that specific project.
+
+Examples:
+  codelens watcher status              # Status of all watchers
+  codelens watcher status .           # Status for current dir`,
+	Args: cobra.MaximumNArgs(1),
+	RunE: runWatcherStatus,
 }
 
 var watcherRunCmd = &cobra.Command{
@@ -88,27 +254,35 @@ var watcherRunCmd = &cobra.Command{
 }
 
 func init() {
-	// Flags globaux
-	rootCmd.PersistentFlags().String("project", ".", "Project root directory")
+	rootCmd.PersistentFlags().String("project", ".", "Project root directory (default: current directory)")
 	rootCmd.PersistentFlags().String("db", ".codelens/index.db", "SQLite database path (relative to project)")
-	rootCmd.PersistentFlags().String("ollama-url", "http://localhost:11434", "Ollama API URL")
-	rootCmd.PersistentFlags().String("ollama-model", "nomic-embed-text", "Ollama embedding model")
+	rootCmd.PersistentFlags().String("ollama-url", "http://localhost:11434", "Ollama API server URL")
+	rootCmd.PersistentFlags().String("ollama-model", "nomic-embed-text", "Ollama embedding model name")
 
 	viper.BindPFlags(rootCmd.PersistentFlags())
 	viper.AutomaticEnv()
 	viper.SetEnvPrefix("CODELENS")
 
-	// Flags spécifiques
-	indexCmd.Flags().Bool("watch", false, "Watch for file changes after initial index")
-	indexCmd.Flags().Bool("force", false, "Re-index all files even if hash unchanged")
-	watcherCmd.PersistentFlags().Duration("interval", 5*time.Second, "Watcher reindex interval")
-	watcherCmd.PersistentFlags().Bool("force", false, "Force full index at watcher startup")
-	watcherCmd.PersistentFlags().String("pid-file", ".codelens/watcher.pid", "Watcher PID file")
-	watcherCmd.PersistentFlags().String("state-file", ".codelens/watcher.state.json", "Watcher status state file")
-	watcherCmd.PersistentFlags().String("log-file", ".codelens/watcher.log", "Watcher log file")
+	indexCmd.Flags().BoolP("watch", "w", false, "Watch for file changes after initial index (Ctrl+C to stop)")
+	indexCmd.Flags().BoolP("force", "f", false, "Re-index all files even if hash unchanged")
+
+	watcherCmd.PersistentFlags().Duration("interval", 5*time.Second, "Watcher re-index interval (e.g., 5s, 1m)")
+	watcherCmd.PersistentFlags().BoolP("force", "f", false, "Force full index at watcher startup")
+	watcherCmd.PersistentFlags().String("pid-file", ".codelens/watcher.pid", "Watcher PID file path")
+	watcherCmd.PersistentFlags().String("state-file", ".codelens/watcher.state.json", "Watcher state file path")
+	watcherCmd.PersistentFlags().String("log-file", ".codelens/watcher.log", "Watcher log file path")
 
 	watcherCmd.AddCommand(watcherStartCmd, watcherStopCmd, watcherStatusCmd, watcherRunCmd)
 	rootCmd.AddCommand(serveCmd, indexCmd, searchCmd, statsCmd, watcherCmd)
+
+	rootCmd.AddCommand(&cobra.Command{
+		Use:   "version",
+		Short: "Show CodeLens version",
+		Run: func(cmd *cobra.Command, args []string) {
+			fmt.Println("CodeLens v0.2.0")
+			fmt.Println("Agentic memory & semantic search for Claude Code")
+		},
+	})
 }
 
 func main() {
