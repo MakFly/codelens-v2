@@ -21,6 +21,13 @@ import (
 	"github.com/yourusername/codelens/internal/watcher"
 )
 
+var (
+	version = "dev"
+	commit  = "unknown"
+	date    = "unknown"
+	builtBy = "unknown"
+)
+
 var rootCmd = &cobra.Command{
 	Use:   "codelens",
 	Short: "Agentic memory & semantic search MCP server for Claude Code",
@@ -279,7 +286,13 @@ func init() {
 		Use:   "version",
 		Short: "Show CodeLens version",
 		Run: func(cmd *cobra.Command, args []string) {
-			fmt.Println("CodeLens v0.2.0")
+			fmt.Printf("CodeLens %s\n", version)
+			if commit != "unknown" {
+				fmt.Printf("Commit: %s\n", commit)
+			}
+			if date != "unknown" {
+				fmt.Printf("Built: %s\n", date)
+			}
 			fmt.Println("Agentic memory & semantic search for Claude Code")
 		},
 	})

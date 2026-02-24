@@ -1,4 +1,4 @@
-.PHONY: build test bench install clean lint watcher-start watcher-stop watcher-status
+.PHONY: build test bench install clean lint watcher-start watcher-stop watcher-status release
 
 BINARY_DIR := bin
 SERVER_BIN  := $(BINARY_DIR)/codelens
@@ -10,6 +10,10 @@ build:
 	go build -o $(SERVER_BIN) ./cmd/codelens
 	go build -o $(HOOK_BIN) ./cmd/hook
 	@echo "✓ Built: $(SERVER_BIN) and $(HOOK_BIN)"
+
+## Build release archives (requires GoReleaser)
+release:
+	@goreleaser release --clean --snapshot || echo "Run 'goreleaser release' to create releases"
 
 ## Install binaries to /usr/local/bin (requires sudo or adjust PATH)
 install: build

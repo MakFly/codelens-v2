@@ -1,0 +1,64 @@
+version: 2
+
+project_name: codelens
+dist: dist
+
+before:
+  hooks:
+    - go mod download
+
+builds:
+  - id: codelens
+    binary: codelens
+    main: ./cmd/codelens
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+
+  - id: codelens-hook
+    binary: codelens-hook
+    main: ./cmd/hook
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+
+archives:
+  - id: default
+    files:
+      - install.sh
+
+checksum:
+  algorithm: sha256
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+
+release:
+  github:
+    owner: MakFly
+    name: codelens-v2
+  draft: false
+  prerelease: auto

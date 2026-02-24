@@ -47,32 +47,66 @@ Three complementary layers:
 2. **Hook Interceptor** — `codelens-hook` intercepts Claude Code's native Bash/Read tool calls and redirects to semantic search
 3. **CLAUDE.md** — Prompt-level instructions that prime the agent to prefer CodeLens tools
 
-## Quick Start
+## Installation
+
+### Quick Install (curl)
 
 ```bash
-# 1. Clone
+# Install latest version
+curl -sL https://github.com/MakFly/codelens-v2/releases/latest/download/install.sh | sh
+
+# Or with specific version
+VERSION=0.2.0 curl -sL https://github.com/MakFly/codelens-v2/releases/latest/download/install.sh | sh
+```
+
+### Homebrew
+
+```bash
+# First, tap the repository
+brew tap MakFly/codelens
+
+# Then install
+brew install codelens
+```
+
+### From Source
+
+```bash
+# Clone and build
 git clone https://github.com/MakFly/codelens-v2
 cd codelens-v2
 
-# 2. Run the installation script
-# Auto-detects installed AI clients and configures them
-./scripts/install.sh /path/to/your/project
+# Build with Go
+go build -o codelens ./cmd/codelens/
+go build -o codelens-hook ./cmd/hook/
 
-# 3. Start Ollama (for embeddings)
+# Install to PATH
+mkdir -p ~/.local/bin
+cp codelens codelens-hook ~/.local/bin/
+export PATH=$HOME/.local/bin:$PATH
+```
+
+---
+
+## Quick Start
+
+```bash
+# 1. Install CodeLens (see Installation section above)
+
+# 2. Start Ollama (for embeddings)
 ollama serve
 ollama pull nomic-embed-text
 
-# 4. Index your project
-cd /path/to/your/project
-~/.local/bin/codelens index .
+# 3. Index your project
+codelens index .
 
-# 5. Check index stats
-~/.local/bin/codelens stats
+# 4. Check index stats
+codelens stats
 
-# 6. Start the watcher (optional, manual)
-~/.local/bin/codelens watcher start /path/to/your/project
+# 5. Start the watcher (optional, automatic)
+codelens watcher start .
 
-# 7. Restart your AI client
+# 6. Restart your AI client
 claude  # or: opencode, gemini, codex
 ```
 
@@ -89,15 +123,15 @@ The installer automatically detects and configures:
 
 If a client is not installed, it will be skipped automatically.
 
-### Manual Installation
+### Manual Installation (from release archives)
 
-If you prefer to install manually:
+If you prefer to download binaries manually:
 
 ```bash
-# Build binaries
-cd codelens-v2
-go build -o codelens ./cmd/codelens/
-go build -o codelens-hook ./cmd/hook/
+# Download for your platform
+curl -sL https://github.com/MakFly/codelens-v2/releases/latest/download/codelens-darwin-arm64.tar.gz | tar -xz
+# or
+curl -sL https://github.com/MakFly/codelens-v2/releases/latest/download/codelens-linux-amd64.tar.gz | tar -xz
 
 # Install to PATH
 mkdir -p ~/.local/bin
@@ -105,10 +139,7 @@ cp codelens codelens-hook ~/.local/bin/
 export PATH=$HOME/.local/bin:$PATH
 
 # Index your project
-cd /path/to/your/project
 codelens index .
-
-# Configure clients manually - see scripts/install.sh for reference
 ```
 
 ## MCP Tools
