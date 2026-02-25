@@ -1,9 +1,9 @@
 {
-  "running": true,
-  "pid": 995710,
+  "running": false,
+  "pid": 0,
   "project": "/home/kev/Documents/lab/brainstorming/mcp/codelens-v2",
   "started_at": "2026-02-25T12:40:01.419307868+01:00",
-  "last_cycle_at": "2026-02-25T15:16:11.423294986+01:00",
+  "last_cycle_at": "2026-02-25T15:19:26.420095295+01:00",
   "last_error": "open db: apply schema: Binary was compiled with 'CGO_ENABLED=0', go-sqlite3 requires cgo to work. This is a stub",
   "interval": "5s"
 }
