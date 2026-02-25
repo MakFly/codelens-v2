@@ -110,6 +110,12 @@ codelens watcher start .
 claude  # or: opencode, gemini, codex
 ```
 
+Upgrade later with:
+
+```bash
+codelens update
+```
+
 ### Supported AI Clients (auto-detected)
 
 The installer automatically detects and configures:
@@ -264,8 +270,10 @@ make bench
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `CODELENS_DB_PATH` | `.codelens/index.db` | SQLite database path |
-| `CODELENS_OLLAMA_URL` | `http://localhost:11434` | Ollama server URL |
+| `CODELENS_OLLAMA_URL` | `http://127.0.0.1:11434` | Ollama server URL |
 | `CODELENS_OLLAMA_MODEL` | `nomic-embed-text` | Embedding model |
+| `CODELENS_PROFILE` | `auto` | Runtime profile: `auto|low|balanced|high` |
+| `CODELENS_MAX_CPU_THREADS` | `0` | Max CPU threads per embed request (`0` = profile default) |
 | `CODELENS_TOOL_TIMEOUT` | `20s` | MCP tool timeout |
 | `CODELENS_SKIP_LOCK_CHECK` | `false` | Skip file lock detection (set to `1`) |
 | `CODELENS_MEMORY_AUTO_PUBLISH` | `true` | Auto-publish memories without manual review |
@@ -277,8 +285,10 @@ Edit `config/default.yaml`:
 
 ```yaml
 ollama:
-  url: "http://localhost:11434"
+  url: "http://127.0.0.1:11434"
   model: "nomic-embed-text"
+  profile: "auto"
+  max_cpu_threads: 0
 
 indexer:
   chunk_size: 150
@@ -313,6 +323,11 @@ Check that:
 Try starting manually to see errors:
 ```bash
 codelens serve
+```
+
+If you see `dial tcp [::1]:11434: connect: connection refused`, force IPv4:
+```bash
+export CODELENS_OLLAMA_URL=http://127.0.0.1:11434
 ```
 
 ### "No results from search_codebase"

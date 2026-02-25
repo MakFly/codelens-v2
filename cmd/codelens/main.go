@@ -1,12 +1,17 @@
 package main
 
 import (
+	"archive/tar"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"syscall"
@@ -37,14 +42,17 @@ A tool that provides Claude Code with semantic search over your codebase
 and persistent memory for team insights.
 
 Quick Start:
+  codelens update                     # Update to latest release
   codelens index .                    # Index current project
   codelens serve                      # Start MCP server (stdio)
   codelens stats                     # Show index statistics
   codelens watcher start .           # Start background watcher
 
 Environment Variables:
-  CODELENS_OLLAMA_URL       Ollama server URL (default: http://localhost:11434)
+  CODELENS_OLLAMA_URL       Ollama server URL (default: http://127.0.0.1:11434)
   CODELENS_OLLAMA_MODEL     Embedding model (default: nomic-embed-text)
+  CODELENS_PROFILE          Runtime profile: auto|low|balanced|high (default: auto)
+  CODELENS_MAX_CPU_THREADS  Max CPU threads per embedding request (0=use profile default)
   CODELENS_DB              SQLite database path (default: .codelens/index.db)
   CODELENS_PROJECT         Project root directory (default: .)
 
@@ -100,6 +108,7 @@ Indexing Process:
 
 The --force flag re-indexes all files even if unchanged.
 The --watch flag starts file watching after initial index.
+Runtime profile is auto-tuned by default; override with --profile and --max-cpu-threads.
 
 Examples:
   codelens index .                         # Index current directory
@@ -153,6 +162,17 @@ Shows:
 Use this to verify indexing completed successfully and to monitor
 index health over time.`,
 	RunE: runStats,
+}
+
+var updateCmd = &cobra.Command{
+	Use:   "update",
+	Short: "Update CodeLens to latest release",
+	Long: `Update CodeLens by downloading and running the official install script.
+
+By default, this command installs the latest GitHub release into ~/.local/bin.
+You can pin a specific version with --version and choose a custom install path
+with --install-dir.`,
+	RunE: runUpdate,
 }
 
 var watcherCmd = &cobra.Command{
@@ -263,8 +283,10 @@ var watcherRunCmd = &cobra.Command{
 func init() {
 	rootCmd.PersistentFlags().String("project", ".", "Project root directory (default: current directory)")
 	rootCmd.PersistentFlags().String("db", ".codelens/index.db", "SQLite database path (relative to project)")
-	rootCmd.PersistentFlags().String("ollama-url", "http://localhost:11434", "Ollama API server URL")
+	rootCmd.PersistentFlags().String("ollama-url", "http://127.0.0.1:11434", "Ollama API server URL")
 	rootCmd.PersistentFlags().String("ollama-model", "nomic-embed-text", "Ollama embedding model name")
+	rootCmd.PersistentFlags().String("profile", "auto", "Runtime profile: auto|low|balanced|high")
+	rootCmd.PersistentFlags().Int("max-cpu-threads", 0, "Max CPU threads per embedding request (0=use profile default)")
 
 	viper.BindPFlags(rootCmd.PersistentFlags())
 	viper.AutomaticEnv()
@@ -272,6 +294,8 @@ func init() {
 
 	indexCmd.Flags().BoolP("watch", "w", false, "Watch for file changes after initial index (Ctrl+C to stop)")
 	indexCmd.Flags().BoolP("force", "f", false, "Re-index all files even if hash unchanged")
+	updateCmd.Flags().String("version", "latest", "Version to install: latest or semver (e.g. 0.2.3)")
+	updateCmd.Flags().String("install-dir", "", "Install directory (default: ~/.local/bin)")
 
 	watcherCmd.PersistentFlags().Duration("interval", 5*time.Second, "Watcher re-index interval (e.g., 5s, 1m)")
 	watcherCmd.PersistentFlags().BoolP("force", "f", false, "Force full index at watcher startup")
@@ -280,7 +304,7 @@ func init() {
 	watcherCmd.PersistentFlags().String("log-file", ".codelens/watcher.log", "Watcher log file path")
 
 	watcherCmd.AddCommand(watcherStartCmd, watcherStopCmd, watcherStatusCmd, watcherRunCmd)
-	rootCmd.AddCommand(serveCmd, indexCmd, searchCmd, statsCmd, watcherCmd)
+	rootCmd.AddCommand(serveCmd, indexCmd, searchCmd, statsCmd, updateCmd, watcherCmd)
 
 	rootCmd.AddCommand(&cobra.Command{
 		Use:   "version",
@@ -314,7 +338,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 	}
 	defer db.Close()
 
-	embedder := embeddings.NewOllama(cfg.OllamaURL, cfg.OllamaModel)
+	embedder, _ := buildEmbedder(cfg)
 
 	idx, err := indexer.New(cfg.ProjectPath, db, embedder)
 	if err != nil {
@@ -345,13 +369,23 @@ func runIndex(cmd *cobra.Command, args []string) error {
 	}
 	defer db.Close()
 
-	embedder := embeddings.NewOllama(cfg.OllamaURL, cfg.OllamaModel)
+	embedder, tuning := buildEmbedder(cfg)
 
 	idx, err := indexer.New(path, db, embedder)
 	if err != nil {
 		return fmt.Errorf("create indexer: %w", err)
 	}
 
+	if tuning.InvalidProfile {
+		fmt.Fprintf(os.Stderr, "Warning: invalid profile %q, using %q\n", tuning.RequestedProfile, tuning.Profile)
+	}
+	if tuning.ThreadsClamped {
+		fmt.Fprintf(os.Stderr, "Warning: max-cpu-threads=%d clamped to %d (safety cap=%d)\n", tuning.RequestedThreads, tuning.NumThreads, tuning.HardCap)
+	}
+	fmt.Printf(
+		"Runtime profile: %s | cpu=%d | mem=%dGiB | ollama_threads=%d | max_concurrent=%d\n",
+		tuning.Profile, tuning.CPUs, tuning.MemoryGiB, tuning.NumThreads, tuning.MaxConcurrent,
+	)
 	fmt.Printf("Indexing %s...\n", path)
 	stats, err := idx.IndexAll(context.Background(), force)
 	if err != nil {
@@ -378,7 +412,7 @@ func runSearch(cmd *cobra.Command, args []string) error {
 	}
 	defer db.Close()
 
-	embedder := embeddings.NewOllama(cfg.OllamaURL, cfg.OllamaModel)
+	embedder, _ := buildEmbedder(cfg)
 
 	idx, err := indexer.New(cfg.ProjectPath, db, embedder)
 	if err != nil {
@@ -424,6 +458,186 @@ func runStats(cmd *cobra.Command, args []string) error {
 	fmt.Printf("Failed:     %d\n", stats.FailedFiles)
 	fmt.Printf("Memories:   %d (active)\n", stats.ActiveMemories)
 	fmt.Printf("Last index: %s\n", stats.LastIndexed.Format("2006-01-02 15:04:05"))
+	return nil
+}
+
+func runUpdate(cmd *cobra.Command, args []string) error {
+	target, _ := cmd.Flags().GetString("version")
+	installDir, _ := cmd.Flags().GetString("install-dir")
+
+	if strings.TrimSpace(installDir) == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return fmt.Errorf("resolve home dir: %w", err)
+		}
+		installDir = filepath.Join(home, ".local", "bin")
+	}
+
+	target = strings.TrimSpace(target)
+	if target == "" {
+		target = "latest"
+	}
+
+	release, err := fetchRelease("MakFly/codelens-v2", target)
+	if err != nil {
+		return fmt.Errorf("fetch release metadata: %w", err)
+	}
+	current := version
+	if commit != "unknown" && current != "dev" {
+		current = fmt.Sprintf("%s (%s)", current, commit)
+	}
+
+	tag := strings.TrimSpace(release.TagName)
+	ver := strings.TrimPrefix(tag, "v")
+	goos, goarch := detectReleasePlatform()
+	assetName := fmt.Sprintf("codelens_%s_%s_%s.tar.gz", ver, goos, goarch)
+	assetURL := ""
+	for _, a := range release.Assets {
+		if a.Name == assetName {
+			assetURL = a.BrowserDownloadURL
+			break
+		}
+	}
+	if assetURL == "" {
+		return fmt.Errorf("release %s does not contain asset %q", tag, assetName)
+	}
+
+	fmt.Printf("Current version: %s\n", current)
+	fmt.Printf("Latest release:  %s\n", tag)
+	fmt.Printf("Installing:      %s\n", assetName)
+	fmt.Printf("Install dir:     %s\n\n", installDir)
+
+	if err := os.MkdirAll(installDir, 0o755); err != nil {
+		return fmt.Errorf("prepare install dir: %w", err)
+	}
+	if err := downloadAndExtractTarGz(assetURL, installDir); err != nil {
+		return fmt.Errorf("install release asset: %w", err)
+	}
+
+	fmt.Printf("\n✓ Update completed. Verify with: %s/codelens version\n", installDir)
+	return nil
+}
+
+type githubRelease struct {
+	TagName string `json:"tag_name"`
+	Assets  []struct {
+		Name               string `json:"name"`
+		BrowserDownloadURL string `json:"browser_download_url"`
+	} `json:"assets"`
+}
+
+func fetchRelease(repo, target string) (*githubRelease, error) {
+	url := ""
+	if target == "latest" {
+		url = fmt.Sprintf("https://api.github.com/repos/%s/releases/latest", repo)
+	} else {
+		tag := target
+		if !strings.HasPrefix(tag, "v") {
+			tag = "v" + tag
+		}
+		url = fmt.Sprintf("https://api.github.com/repos/%s/releases/tags/%s", repo, tag)
+	}
+
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("User-Agent", "codelens-cli")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("github api status %d: %s", resp.StatusCode, strings.TrimSpace(string(b)))
+	}
+
+	var payload githubRelease
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(payload.TagName) == "" {
+		return nil, fmt.Errorf("empty tag_name in release payload")
+	}
+	return &payload, nil
+}
+
+func detectReleasePlatform() (string, string) {
+	goos := runtime.GOOS
+	switch goos {
+	case "linux", "darwin":
+	default:
+		goos = "linux"
+	}
+
+	goarch := runtime.GOARCH
+	switch goarch {
+	case "amd64", "arm64":
+	default:
+		goarch = "amd64"
+	}
+	return goos, goarch
+}
+
+func downloadAndExtractTarGz(url, installDir string) error {
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("User-Agent", "codelens-cli")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("download status %d: %s", resp.StatusCode, strings.TrimSpace(string(b)))
+	}
+
+	gzr, err := gzip.NewReader(resp.Body)
+	if err != nil {
+		return err
+	}
+	defer gzr.Close()
+	tr := tar.NewReader(gzr)
+
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return err
+		}
+		if hdr.Typeflag != tar.TypeReg {
+			continue
+		}
+
+		base := filepath.Base(hdr.Name)
+		if base != "codelens" && base != "codelens-hook" {
+			continue
+		}
+		dst := filepath.Join(installDir, base)
+		out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o755)
+		if err != nil {
+			return err
+		}
+		if _, err := io.Copy(out, tr); err != nil {
+			_ = out.Close()
+			return err
+		}
+		if err := out.Close(); err != nil {
+			return err
+		}
+		if err := os.Chmod(dst, 0o755); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -552,7 +766,12 @@ func runWatcherCycle(ctx context.Context, cfg watcher.Config) (int, int, error) 
 	}
 	defer db.Close()
 
-	embedder := embeddings.NewOllama(cfg.OllamaURL, cfg.OllamaModel)
+	embedder, _ := buildEmbedder(Config{
+		OllamaURL:     cfg.OllamaURL,
+		OllamaModel:   cfg.OllamaModel,
+		Profile:       cfg.Profile,
+		MaxCPUThreads: cfg.MaxCPUThreads,
+	})
 	idx, err := indexer.New(cfg.ProjectPath, db, embedder)
 	if err != nil {
 		return 0, 0, fmt.Errorf("create indexer: %w", err)
@@ -626,15 +845,17 @@ func buildWatcherConfig(cmd *cobra.Command, args []string) (watcher.Config, erro
 	}
 
 	return watcher.Config{
-		ProjectPath: absProject,
-		DBPath:      dbPath,
-		OllamaURL:   cfg.OllamaURL,
-		OllamaModel: cfg.OllamaModel,
-		Interval:    interval,
-		Force:       force,
-		PIDFile:     resolve(pidFile),
-		StateFile:   resolve(stateFile),
-		LogFile:     resolve(logFile),
+		ProjectPath:   absProject,
+		DBPath:        dbPath,
+		OllamaURL:     cfg.OllamaURL,
+		OllamaModel:   cfg.OllamaModel,
+		Profile:       cfg.Profile,
+		MaxCPUThreads: cfg.MaxCPUThreads,
+		Interval:      interval,
+		Force:         force,
+		PIDFile:       resolve(pidFile),
+		StateFile:     resolve(stateFile),
+		LogFile:       resolve(logFile),
 	}, nil
 }
 
@@ -692,10 +913,12 @@ func discoverIndexedProjects() ([]string, error) {
 }
 
 type Config struct {
-	ProjectPath string
-	DBPath      string
-	OllamaURL   string
-	OllamaModel string
+	ProjectPath   string
+	DBPath        string
+	OllamaURL     string
+	OllamaModel   string
+	Profile       string
+	MaxCPUThreads int
 }
 
 func loadConfig() Config {
@@ -708,11 +931,21 @@ func loadConfig() Config {
 	}
 
 	return Config{
-		ProjectPath: projectPath,
-		DBPath:      dbPath,
-		OllamaURL:   viper.GetString("ollama-url"),
-		OllamaModel: viper.GetString("ollama-model"),
+		ProjectPath:   projectPath,
+		DBPath:        dbPath,
+		OllamaURL:     viper.GetString("ollama-url"),
+		OllamaModel:   viper.GetString("ollama-model"),
+		Profile:       viper.GetString("profile"),
+		MaxCPUThreads: viper.GetInt("max-cpu-threads"),
 	}
+}
+
+func buildEmbedder(cfg Config) (*embeddings.OllamaClient, RuntimeTuning) {
+	e := embeddings.NewOllama(cfg.OllamaURL, cfg.OllamaModel)
+	t := ResolveRuntimeTuning(cfg.Profile, cfg.MaxCPUThreads)
+	e.SetNumThreads(t.NumThreads)
+	e.SetMaxConcurrent(t.MaxConcurrent)
+	return e, t
 }
 
 func isAbsPath(p string) bool { return len(p) > 0 && p[0] == '/' }

@@ -7,21 +7,24 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"syscall"
 	"time"
 )
 
 type Config struct {
-	ProjectPath string
-	DBPath      string
-	OllamaURL   string
-	OllamaModel string
-	Interval    time.Duration
-	Force       bool
-	PIDFile     string
-	StateFile   string
-	LogFile     string
+	ProjectPath   string
+	DBPath        string
+	OllamaURL     string
+	OllamaModel   string
+	Profile       string
+	MaxCPUThreads int
+	Interval      time.Duration
+	Force         bool
+	PIDFile       string
+	StateFile     string
+	LogFile       string
 }
 
 type Status struct {
@@ -66,6 +69,8 @@ func Start(cfg Config) (int, error) {
 		"--db", cfg.DBPath,
 		"--ollama-url", cfg.OllamaURL,
 		"--ollama-model", cfg.OllamaModel,
+		"--profile", cfg.Profile,
+		"--max-cpu-threads", strconv.Itoa(cfg.MaxCPUThreads),
 		"--interval", cfg.Interval.String(),
 		"--pid-file", cfg.PIDFile,
 		"--state-file", cfg.StateFile,

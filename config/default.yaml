@@ -6,11 +6,13 @@ project: "."
 db: ".codelens/index.db"
 
 ollama:
-  url: "http://localhost:11434"
+  url: "http://127.0.0.1:11434"
   model: "nomic-embed-text"   # 768 dims, fast, good for code
   # Alternative: "mxbai-embed-large" (1024 dims, better quality, slower)
   timeout_seconds: 30
   max_concurrent: 4           # Parallel embedding requests
+  profile: "auto"             # auto|low|balanced|high
+  max_cpu_threads: 0          # 0 = use profile default
 
 indexer:
   extensions:
