@@ -43,7 +43,24 @@ model = "gpt-5.3-codex"
 TOML
 fi
 
-if ! grep -q "\[mcp_servers.codelens\]" "$CODEX_CONFIG"; then
+# Remove any existing codelens MCP section (and nested env block) to avoid stale project pinning.
+tmp_codex="$(mktemp)"
+awk '
+  BEGIN { skip = 0 }
+  /^[[:space:]]*\[mcp_servers\.codelens\][[:space:]]*$/ { skip = 1; next }
+  {
+    if (skip == 1) {
+      if ($0 ~ /^[[:space:]]*\[[^]]+\][[:space:]]*$/) {
+        skip = 0
+      } else {
+        next
+      }
+    }
+    print
+  }
+' "$CODEX_CONFIG" > "$tmp_codex"
+mv "$tmp_codex" "$CODEX_CONFIG"
+
 cat >> "$CODEX_CONFIG" <<TOML
 
 [mcp_servers.codelens]
@@ -55,9 +72,6 @@ CODELENS_OLLAMA_MODEL = "nomic-embed-text"
 CODELENS_OLLAMA_URL = "http://localhost:11434"
 CODELENS_PROJECT = "$PROJECT_PATH"
 TOML
-else
-  echo "Codex codelens MCP section already exists in $CODEX_CONFIG (left unchanged)"
-fi
 
 echo "Updated $CODEX_CONFIG"
 

@@ -281,7 +281,7 @@ var watcherRunCmd = &cobra.Command{
 }
 
 func init() {
-	rootCmd.PersistentFlags().String("project", ".", "Project root directory (default: current directory)")
+	rootCmd.PersistentFlags().String("project", ".", "Project root directory (auto-detected from cwd if flag/env not explicitly set)")
 	rootCmd.PersistentFlags().String("db", ".codelens/index.db", "SQLite database path (relative to project)")
 	rootCmd.PersistentFlags().String("ollama-url", "http://127.0.0.1:11434", "Ollama API server URL")
 	rootCmd.PersistentFlags().String("ollama-model", "nomic-embed-text", "Ollama embedding model name")
@@ -330,7 +330,13 @@ func main() {
 }
 
 func runServe(cmd *cobra.Command, args []string) error {
-	cfg := loadConfig()
+	cfg, err := loadConfig(cmd)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(os.Stderr, "Project resolution source: %s\n", cfg.ProjectSource)
+	fmt.Fprintf(os.Stderr, "Resolved project: %s\n", cfg.ProjectPath)
+	fmt.Fprintf(os.Stderr, "Resolved db: %s\n", cfg.DBPath)
 
 	db, err := store.Open(cfg.DBPath)
 	if err != nil {
@@ -359,7 +365,10 @@ func runIndex(cmd *cobra.Command, args []string) error {
 		path = args[0]
 	}
 
-	cfg := loadConfig()
+	cfg, err := loadConfig(cmd)
+	if err != nil {
+		return err
+	}
 	watch, _ := cmd.Flags().GetBool("watch")
 	force, _ := cmd.Flags().GetBool("force")
 
@@ -404,7 +413,10 @@ func runIndex(cmd *cobra.Command, args []string) error {
 }
 
 func runSearch(cmd *cobra.Command, args []string) error {
-	cfg := loadConfig()
+	cfg, err := loadConfig(cmd)
+	if err != nil {
+		return err
+	}
 
 	db, err := store.Open(cfg.DBPath)
 	if err != nil {
@@ -436,7 +448,10 @@ func runSearch(cmd *cobra.Command, args []string) error {
 }
 
 func runStats(cmd *cobra.Command, args []string) error {
-	cfg := loadConfig()
+	cfg, err := loadConfig(cmd)
+	if err != nil {
+		return err
+	}
 
 	db, err := store.Open(cfg.DBPath)
 	if err != nil {
@@ -816,7 +831,10 @@ func runWatcherAuto(cmd *cobra.Command, args []string) error {
 }
 
 func buildWatcherConfig(cmd *cobra.Command, args []string) (watcher.Config, error) {
-	cfg := loadConfig()
+	cfg, err := loadConfig(cmd)
+	if err != nil {
+		return watcher.Config{}, err
+	}
 	projectPath := cfg.ProjectPath
 	if len(args) > 0 && args[0] != "" {
 		projectPath = args[0]
@@ -914,6 +932,7 @@ func discoverIndexedProjects() ([]string, error) {
 
 type Config struct {
 	ProjectPath   string
+	ProjectSource string
 	DBPath        string
 	OllamaURL     string
 	OllamaModel   string
@@ -921,23 +940,43 @@ type Config struct {
 	MaxCPUThreads int
 }
 
-func loadConfig() Config {
-	projectPath := viper.GetString("project")
-	dbPath := viper.GetString("db")
+type ProjectResolution struct {
+	Path   string
+	Source string
+}
 
-	// Si dbPath est relatif, le mettre dans le projet
-	if !isAbsPath(dbPath) {
-		dbPath = projectPath + "/" + dbPath
+func loadConfig(cmd *cobra.Command) (Config, error) {
+	projectFlagValue := viper.GetString("project")
+	projectFlagChanged := false
+	if cmd != nil {
+		projectFlagChanged = cmd.Flags().Changed("project")
+	}
+
+	envProjectValue, envProjectSet := os.LookupEnv("CODELENS_PROJECT")
+	cwd, err := os.Getwd()
+	if err != nil {
+		return Config{}, fmt.Errorf("resolve cwd: %w", err)
+	}
+
+	project, err := resolveProjectPath(projectFlagValue, projectFlagChanged, envProjectValue, envProjectSet, cwd)
+	if err != nil {
+		return Config{}, err
+	}
+
+	dbPath, err := resolveDBPath(project.Path, viper.GetString("db"))
+	if err != nil {
+		return Config{}, err
 	}
 
 	return Config{
-		ProjectPath:   projectPath,
+		ProjectPath:   project.Path,
+		ProjectSource: project.Source,
 		DBPath:        dbPath,
 		OllamaURL:     viper.GetString("ollama-url"),
 		OllamaModel:   viper.GetString("ollama-model"),
 		Profile:       viper.GetString("profile"),
 		MaxCPUThreads: viper.GetInt("max-cpu-threads"),
-	}
+	}, nil
 }
 
 func buildEmbedder(cfg Config) (*embeddings.OllamaClient, RuntimeTuning) {
@@ -948,7 +987,85 @@ func buildEmbedder(cfg Config) (*embeddings.OllamaClient, RuntimeTuning) {
 	return e, t
 }
 
-func isAbsPath(p string) bool { return len(p) > 0 && p[0] == '/' }
+func resolveProjectPath(projectFlagValue string, projectFlagChanged bool, envProjectValue string, envProjectSet bool, cwd string) (ProjectResolution, error) {
+	cleanCWD := strings.TrimSpace(cwd)
+	if cleanCWD == "" {
+		return ProjectResolution{}, fmt.Errorf("empty cwd")
+	}
+
+	if projectFlagChanged {
+		flagValue := strings.TrimSpace(projectFlagValue)
+		if flagValue == "" {
+			return ProjectResolution{}, fmt.Errorf("project flag is empty")
+		}
+		abs, err := filepath.Abs(flagValue)
+		if err != nil {
+			return ProjectResolution{}, fmt.Errorf("resolve project flag path: %w", err)
+		}
+		return ProjectResolution{Path: filepath.Clean(abs), Source: "flag"}, nil
+	}
+
+	if envProjectSet {
+		envValue := strings.TrimSpace(envProjectValue)
+		if envValue != "" {
+			abs, err := filepath.Abs(envValue)
+			if err != nil {
+				return ProjectResolution{}, fmt.Errorf("resolve CODELENS_PROJECT path: %w", err)
+			}
+			return ProjectResolution{Path: filepath.Clean(abs), Source: "env"}, nil
+		}
+	}
+
+	auto, found, err := findNearestIndexedProject(cleanCWD)
+	if err != nil {
+		return ProjectResolution{}, err
+	}
+	if found {
+		return ProjectResolution{Path: auto, Source: "auto"}, nil
+	}
+
+	absCWD, err := filepath.Abs(cleanCWD)
+	if err != nil {
+		return ProjectResolution{}, fmt.Errorf("resolve fallback cwd path: %w", err)
+	}
+	return ProjectResolution{Path: filepath.Clean(absCWD), Source: "fallback"}, nil
+}
+
+func findNearestIndexedProject(start string) (string, bool, error) {
+	absStart, err := filepath.Abs(start)
+	if err != nil {
+		return "", false, fmt.Errorf("resolve start path: %w", err)
+	}
+	current := filepath.Clean(absStart)
+
+	for {
+		dbPath := filepath.Join(current, ".codelens", "index.db")
+		if fi, statErr := os.Stat(dbPath); statErr == nil && !fi.IsDir() {
+			return current, true, nil
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return "", false, nil
+		}
+		current = parent
+	}
+}
+
+func resolveDBPath(projectPath, dbValue string) (string, error) {
+	project := strings.TrimSpace(projectPath)
+	if project == "" {
+		return "", fmt.Errorf("project path is empty")
+	}
+
+	db := strings.TrimSpace(dbValue)
+	if db == "" {
+		db = ".codelens/index.db"
+	}
+	if filepath.IsAbs(db) {
+		return filepath.Clean(db), nil
+	}
+	return filepath.Join(project, db), nil
+}
 
 func truncate(s string, n int) string {
 	if len(s) <= n {
