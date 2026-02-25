@@ -38,6 +38,39 @@ func (db *DB) PurgeExcludedByPrefixes(ctx context.Context, prefixes []string) er
 	return nil
 }
 
+func (db *DB) ListIndexedFilePaths(ctx context.Context) ([]string, error) {
+	rows, err := db.conn.QueryContext(ctx, `SELECT DISTINCT file_path FROM chunks`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var paths []string
+	for rows.Next() {
+		var p string
+		if err := rows.Scan(&p); err != nil {
+			return nil, err
+		}
+		paths = append(paths, p)
+	}
+	return paths, rows.Err()
+}
+
+func (db *DB) PurgeByFilePaths(ctx context.Context, paths []string) error {
+	for _, p := range paths {
+		if _, err := db.conn.ExecContext(ctx, `DELETE FROM chunks WHERE file_path = ?`, p); err != nil {
+			return err
+		}
+		if _, err := db.conn.ExecContext(ctx, `DELETE FROM file_hashes WHERE file_path = ?`, p); err != nil {
+			return err
+		}
+		if _, err := db.conn.ExecContext(ctx, `DELETE FROM index_failures WHERE file_path = ?`, p); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (db *DB) PurgeExcludedBySuffixes(ctx context.Context, suffixes []string) error {
 	for _, s := range suffixes {
 		s = strings.ToLower(strings.TrimSpace(s))

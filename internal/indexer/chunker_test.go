@@ -736,6 +736,19 @@ func TestShouldSkipFile_BinaryAndMedia(t *testing.T) {
 	assert.False(t, shouldSkipFile("app.ts"))
 }
 
+// --- Generated file exclusion Tests ---
+
+func TestShouldSkipFile_Generated(t *testing.T) {
+	assert.True(t, shouldSkipFile("vehicle-names-map.generated.ts"))
+	assert.True(t, shouldSkipFile("lib/seo/data.generated.js"))
+	assert.True(t, shouldSkipFile("schema.generated.graphql"))
+	assert.True(t, shouldSkipFile("types.generated.go"))
+	assert.True(t, shouldSkipFile("styles.generated.css"))
+	assert.True(t, shouldSkipFile("data.generated.json"))
+	assert.False(t, shouldSkipFile("app.ts"))
+	assert.False(t, shouldSkipFile("generated.ts"))
+}
+
 // --- ChunkFile router Tests ---
 
 func TestChunkFile_RoutesToCorrectChunker(t *testing.T) {

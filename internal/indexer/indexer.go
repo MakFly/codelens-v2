@@ -24,6 +24,7 @@ type Indexer struct {
 	projectRoot string
 	db          *store.DB
 	embedder    embeddings.Embedder
+	ignoreList  *IgnoreList
 }
 
 var excludedRootDirs = map[string]struct{}{
@@ -95,6 +96,9 @@ var excludedFileSuffixes = []string{
 	".min.js",
 	".min.css",
 	".map",
+	// Generated files
+	".generated.ts", ".generated.js", ".generated.css", ".generated.go",
+	".generated.json", ".generated.graphql",
 	// Compiled/binary artifacts
 	".pyc", ".pyo", ".class",
 	".dll", ".exe", ".so", ".dylib", ".o", ".a",
@@ -166,10 +170,13 @@ func New(projectRoot string, db *store.DB, embedder embeddings.Embedder) (*Index
 	if err != nil {
 		return nil, err
 	}
+	ignoreList, _ := loadIgnorePatterns(abs)
+
 	return &Indexer{
 		projectRoot: abs,
 		db:          db,
 		embedder:    embedder,
+		ignoreList:  ignoreList,
 	}, nil
 }
 
@@ -205,10 +212,16 @@ func (i *Indexer) IndexAll(ctx context.Context, force bool, onProgress ProgressC
 			if shouldSkipDir(rel) {
 				return filepath.SkipDir
 			}
+			if i.ignoreList != nil && i.ignoreList.IsIgnored(rel, true) {
+				return filepath.SkipDir
+			}
 			return nil
 		}
 
 		if shouldSkipFile(rel) {
+			return nil
+		}
+		if i.ignoreList != nil && i.ignoreList.IsIgnored(rel, false) {
 			return nil
 		}
 		if languageFromPath(path) == "" {
@@ -422,6 +435,9 @@ func (i *Indexer) Watch(ctx context.Context) error {
 				if shouldSkipDir(rel) {
 					return filepath.SkipDir
 				}
+				if i.ignoreList != nil && i.ignoreList.IsIgnored(filepath.ToSlash(rel), true) {
+					return filepath.SkipDir
+				}
 				watchMu.Lock()
 				if !watchedDirs[wp] {
 					watchedDirs[wp] = true
@@ -458,6 +474,10 @@ func (i *Indexer) Watch(ctx context.Context) error {
 			cycleRunning = false
 			cycleMu.Unlock()
 		}()
+
+		// Reload .codelensignore before each cycle
+		newIgnore, _ := loadIgnorePatterns(i.projectRoot)
+		i.ignoreList = newIgnore
 
 		if _, err := i.IndexAll(ctx, false, nil); err != nil {
 			fmt.Fprintf(os.Stderr, "index cycle error: %v\n", err)
@@ -910,5 +930,25 @@ func (i *Indexer) purgeExcludedArtifacts(ctx context.Context) error {
 	if err := i.db.PurgeExcludedBySuffixes(ctx, excludedFileSuffixes); err != nil {
 		return err
 	}
+
+	// Purge files matching .codelensignore patterns
+	if i.ignoreList != nil {
+		allPaths, err := i.db.ListIndexedFilePaths(ctx)
+		if err != nil {
+			return err
+		}
+		var toDelete []string
+		for _, p := range allPaths {
+			if i.ignoreList.IsIgnored(p, false) {
+				toDelete = append(toDelete, p)
+			}
+		}
+		if len(toDelete) > 0 {
+			if err := i.db.PurgeByFilePaths(ctx, toDelete); err != nil {
+				return err
+			}
+		}
+	}
+
 	return nil
 }
