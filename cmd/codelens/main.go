@@ -23,6 +23,7 @@ import (
 	"github.com/yourusername/codelens/internal/indexer"
 	"github.com/yourusername/codelens/internal/mcp"
 	"github.com/yourusername/codelens/internal/store"
+	"github.com/yourusername/codelens/internal/updatecheck"
 	"github.com/yourusername/codelens/internal/watcher"
 )
 
@@ -55,6 +56,8 @@ Environment Variables:
   CODELENS_MAX_CPU_THREADS  Max CPU threads per embedding request (0=use profile default)
   CODELENS_DB              SQLite database path (default: .codelens/index.db)
   CODELENS_PROJECT         Project root directory (default: .)
+  CODELENS_DISABLE_UPDATE_CHECK    Disable update notifications (1/true/yes)
+  CODELENS_UPDATE_CHECK_TTL_HOURS  Cache TTL for update checks (default: 12)
 
 For more help, see: https://github.com/MakFly/codelens-v2`,
 }
@@ -281,6 +284,10 @@ var watcherRunCmd = &cobra.Command{
 }
 
 func init() {
+	rootCmd.PersistentPreRun = func(cmd *cobra.Command, args []string) {
+		maybeNotifyUpdate(cmd)
+	}
+
 	rootCmd.PersistentFlags().String("project", ".", "Project root directory (auto-detected from cwd if flag/env not explicitly set)")
 	rootCmd.PersistentFlags().String("db", ".codelens/index.db", "SQLite database path (relative to project)")
 	rootCmd.PersistentFlags().String("ollama-url", "http://127.0.0.1:11434", "Ollama API server URL")
@@ -326,6 +333,40 @@ func main() {
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
+	}
+}
+
+func maybeNotifyUpdate(cmd *cobra.Command) {
+	if shouldSkipUpdateCheck(cmd) {
+		return
+	}
+
+	checker := updatecheck.NewDefault()
+	if checker.Disabled {
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 1200*time.Millisecond)
+	defer cancel()
+
+	result, err := checker.Check(ctx, version)
+	if err != nil || !result.NeedsUpdate {
+		return
+	}
+
+	fmt.Fprintf(os.Stderr, "Update available: %s (current: %s). Run: codelens update\n", result.LatestTag, result.CurrentVersion)
+}
+
+func shouldSkipUpdateCheck(cmd *cobra.Command) bool {
+	if cmd == nil {
+		return false
+	}
+
+	switch cmd.CommandPath() {
+	case "codelens serve", "codelens watcher run", "codelens update":
+		return true
+	default:
+		return false
 	}
 }
 
