@@ -33,3 +33,5 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REF: refs/tags/${{ inputs.tag }}
+          GORELEASER_CURRENT_TAG: ${{ inputs.tag }}

@@ -52,6 +52,11 @@ jobs:
         with:
           go-version: '1.24.x'
 
+      - name: Verify tag checkout
+        run: |
+          echo "Expected tag: ${{ needs.tag.outputs.new_tag }}"
+          git describe --tags --exact-match
+
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@v6
         with:
@@ -59,3 +64,5 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REF: refs/tags/${{ needs.tag.outputs.new_tag }}
+          GORELEASER_CURRENT_TAG: ${{ needs.tag.outputs.new_tag }}
