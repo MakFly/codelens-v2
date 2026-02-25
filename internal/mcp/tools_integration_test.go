@@ -238,7 +238,7 @@ func TestResourceStats_ContainsEnrichedFields(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new indexer: %v", err)
 	}
-	if _, err := idx.IndexAll(context.Background(), true); err != nil {
+	if _, err := idx.IndexAll(context.Background(), true, nil); err != nil {
 		t.Fatalf("index all: %v", err)
 	}
 	if err := db.RecordIndexFailure(context.Background(), "broken.go", "parse failure"); err != nil {

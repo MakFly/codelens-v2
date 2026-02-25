@@ -59,7 +59,7 @@ func TestIndexAll_SplitsChunksOnContextOverflow(t *testing.T) {
 	idx, err := New(tmp, db, &lengthLimitedEmbedder{maxLines: 20})
 	require.NoError(t, err)
 
-	stats, err := idx.IndexAll(context.Background(), true)
+	stats, err := idx.IndexAll(context.Background(), true, nil)
 	require.NoError(t, err)
 	require.Equal(t, 1, stats.Files)
 	require.Equal(t, 0, stats.FailedFiles)
@@ -79,7 +79,7 @@ func TestIndexAll_RecordsAndSkipsFailures(t *testing.T) {
 	idx, err := New(tmp, db, &lengthLimitedEmbedder{maxLines: 100, failOn: "FAILME"})
 	require.NoError(t, err)
 
-	stats, err := idx.IndexAll(context.Background(), true)
+	stats, err := idx.IndexAll(context.Background(), true, nil)
 	require.NoError(t, err)
 	require.Equal(t, 1, stats.Files)
 	require.Equal(t, 1, stats.FailedFiles)
@@ -105,7 +105,7 @@ func BuildEmbeddingClient() {
 	idx, err := New(tmp, db, &lengthLimitedEmbedder{maxLines: 100, failOn: "lookupquery"})
 	require.NoError(t, err)
 
-	_, err = idx.IndexAll(context.Background(), true)
+	_, err = idx.IndexAll(context.Background(), true, nil)
 	require.NoError(t, err)
 
 	results, err := idx.Search(context.Background(), "lookupquery embedding client", 5)

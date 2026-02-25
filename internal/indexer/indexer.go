@@ -107,13 +107,15 @@ func (i *Indexer) ResolvePath(path string) string {
 	return filepath.Join(i.projectRoot, path)
 }
 
-func (i *Indexer) IndexAll(ctx context.Context, force bool) (*IndexStats, error) {
+func (i *Indexer) IndexAll(ctx context.Context, force bool, onProgress ProgressCallback) (*IndexStats, error) {
 	start := time.Now()
 	stats := &IndexStats{}
 	if err := i.purgeExcludedArtifacts(ctx); err != nil {
 		return nil, err
 	}
 
+	// Phase 1: scanning — count eligible files.
+	var eligible []string
 	err := filepath.WalkDir(i.projectRoot, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -132,25 +134,73 @@ func (i *Indexer) IndexAll(ctx context.Context, force bool) (*IndexStats, error)
 		}
 
 		if shouldSkipFile(rel) {
-			// If a file is now excluded, clear old failure records from previous indexing runs.
-			if err := i.db.ClearIndexFailuresByFile(ctx, rel); err != nil {
-				return err
-			}
+			return nil
+		}
+		if languageFromPath(path) == "" {
 			return nil
 		}
 
-		lang := languageFromPath(path)
-		if lang == "" {
-			return nil
+		eligible = append(eligible, path)
+		if onProgress != nil {
+			onProgress(ProgressEvent{
+				Phase:      "scanning",
+				TotalFiles: len(eligible),
+			})
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	totalFiles := len(eligible)
+	if onProgress != nil {
+		onProgress(ProgressEvent{
+			Phase:      "scanning",
+			TotalFiles: totalFiles,
+		})
+	}
+
+	// Phase 2: indexing — process each eligible file.
+	for idx, path := range eligible {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		default:
+		}
+
+		rel, relErr := filepath.Rel(i.projectRoot, path)
+		if relErr != nil {
+			return nil, relErr
+		}
+		rel = filepath.ToSlash(rel)
+
+		if onProgress != nil {
+			onProgress(ProgressEvent{
+				Phase:          "indexing",
+				TotalFiles:     totalFiles,
+				ProcessedFiles: idx,
+				CurrentFile:    rel,
+				Chunks:         stats.Chunks,
+				FailedFiles:    stats.FailedFiles,
+			})
+		}
+
+		// Clear failures for files that are now excluded (checked during walk already).
+		if shouldSkipFile(rel) {
+			if err := i.db.ClearIndexFailuresByFile(ctx, rel); err != nil {
+				return nil, err
+			}
+			continue
 		}
 
 		contentBytes, err := os.ReadFile(path)
 		if err != nil {
-			return err
+			return nil, err
 		}
 
 		if isFileBeingWritten(path) {
-			return nil
+			continue
 		}
 		content := string(contentBytes)
 		fileHash := hashString(content)
@@ -158,46 +208,52 @@ func (i *Indexer) IndexAll(ctx context.Context, force bool) (*IndexStats, error)
 		if !force {
 			prevHash, err := i.db.GetFileHash(ctx, rel)
 			if err == nil && prevHash == fileHash {
-				return nil
+				continue
 			}
 		}
 
-		embedded, err := i.buildEmbeddedChunks(ctx, rel, content, lang)
+		embedded, err := i.buildEmbeddedChunks(ctx, rel, content, languageFromPath(path))
 		if err != nil {
 			stats.FailedFiles++
 			if recErr := i.db.RecordIndexFailure(ctx, rel, err.Error()); recErr != nil {
-				return fmt.Errorf("index file %s: %w (record failure: %v)", rel, err, recErr)
+				return nil, fmt.Errorf("index file %s: %w (record failure: %v)", rel, err, recErr)
 			}
-			return nil
+			continue
 		}
 
 		if err := i.db.DeleteChunksByFile(ctx, rel); err != nil {
-			return err
+			return nil, err
 		}
 
 		for _, e := range embedded {
 			if err := i.db.UpsertChunk(ctx, toStoreChunk(e.chunk), e.embedding); err != nil {
 				stats.FailedFiles++
 				if recErr := i.db.RecordIndexFailure(ctx, rel, err.Error()); recErr != nil {
-					return fmt.Errorf("upsert chunk for %s: %w (record failure: %v)", rel, err, recErr)
+					return nil, fmt.Errorf("upsert chunk for %s: %w (record failure: %v)", rel, err, recErr)
 				}
-				return nil
+				continue
 			}
 		}
 
 		if err := i.db.SetFileHash(ctx, rel, fileHash); err != nil {
-			return err
+			return nil, err
 		}
 		if err := i.db.ClearIndexFailuresByFile(ctx, rel); err != nil {
-			return err
+			return nil, err
 		}
 
 		stats.Files++
 		stats.Chunks += len(embedded)
-		return nil
-	})
-	if err != nil {
-		return nil, err
+	}
+
+	if onProgress != nil {
+		onProgress(ProgressEvent{
+			Phase:          "indexing",
+			TotalFiles:     totalFiles,
+			ProcessedFiles: totalFiles,
+			Chunks:         stats.Chunks,
+			FailedFiles:    stats.FailedFiles,
+		})
 	}
 
 	stats.Duration = time.Since(start)
@@ -328,7 +384,7 @@ func (i *Indexer) Watch(ctx context.Context) error {
 			cycleMu.Unlock()
 		}()
 
-		if _, err := i.IndexAll(ctx, false); err != nil {
+		if _, err := i.IndexAll(ctx, false, nil); err != nil {
 			fmt.Fprintf(os.Stderr, "index cycle error: %v\n", err)
 		}
 	}
