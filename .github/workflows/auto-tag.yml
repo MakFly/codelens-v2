@@ -1,0 +1,35 @@
+name: Auto Tag
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  tag:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Compute and create semantic version tag
+        id: tag_version
+        uses: mathieudutour/github-tag-action@v6.2
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          tag_prefix: v
+          default_bump: patch
+          release_branches: main
+
+      - name: Tag result
+        run: |
+          if [ -n "${{ steps.tag_version.outputs.new_tag }}" ]; then
+            echo "Created tag: ${{ steps.tag_version.outputs.new_tag }}"
+          else
+            echo "No new tag created"
+          fi

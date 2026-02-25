@@ -2,6 +2,8 @@ package mcp
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"regexp"
@@ -408,13 +410,43 @@ Chunks:          %d
 Failed files:    %d
 Active memories: %d
 Last indexed:    %s
+
+Coverage:
+  Embedded:      %d/%d
+  Coverage:      %.1f%%
+  Avg/file:      %.2f
+
+Top languages:
+%s
+
+Memory pipeline:
+  Proposals:     pending=%d published=%d rejected=%d
+  Lifecycle:     archived=%d expired=%d
+
+Recent failures:
+  24h:           %d
+  7d:            %d
+  Last failure:  %s
 `,
 		s.idx.ProjectRoot(),
 		stats.Files,
 		stats.Chunks,
 		stats.FailedFiles,
 		stats.ActiveMemories,
-		stats.LastIndexed.Format("2006-01-02 15:04:05"),
+		formatStatsTime(stats.LastIndexed),
+		stats.EmbeddedChunks,
+		stats.Chunks,
+		stats.EmbeddingCoveragePct,
+		stats.AvgChunksPerFile,
+		formatTopLanguages(stats.TopLanguages),
+		stats.MemoryProposals.Pending,
+		stats.MemoryProposals.Published,
+		stats.MemoryProposals.Rejected,
+		stats.Memories.Archived,
+		stats.Memories.ExpiredPublished,
+		stats.Failures.Last24h,
+		stats.Failures.Last7d,
+		formatStatsTime(stats.Failures.LastFailure),
 	)
 
 	toolLog(meta, stage, "ok")
@@ -431,18 +463,70 @@ func (s *Server) handleResourceStats(ctx context.Context, req mcp.ReadResourceRe
 	stats, err := s.db.StatsWithContext(ctxTool)
 	if err != nil {
 		toolLog(meta, stage, "failed")
-		return nil, fmt.Errorf(toolFailure(meta, stage, err))
+		return nil, errors.New(toolFailure(meta, stage, err))
 	}
 
-	json := fmt.Sprintf(`{"files":%d,"chunks":%d,"failed_files":%d,"active_memories":%d,"last_indexed":"%s"}`,
-		stats.Files, stats.Chunks, stats.FailedFiles, stats.ActiveMemories,
-		stats.LastIndexed.Format(time.RFC3339),
-	)
+	payload := map[string]interface{}{
+		"files":                  stats.Files,
+		"chunks":                 stats.Chunks,
+		"failed_files":           stats.FailedFiles,
+		"active_memories":        stats.ActiveMemories,
+		"last_indexed":           formatStatsTimeRFC3339(stats.LastIndexed),
+		"embedded_chunks":        stats.EmbeddedChunks,
+		"embedding_coverage_pct": stats.EmbeddingCoveragePct,
+		"avg_chunks_per_file":    stats.AvgChunksPerFile,
+		"top_languages":          stats.TopLanguages,
+		"memory_proposals": map[string]int{
+			"pending":   stats.MemoryProposals.Pending,
+			"published": stats.MemoryProposals.Published,
+			"rejected":  stats.MemoryProposals.Rejected,
+		},
+		"memories": map[string]int{
+			"archived":          stats.Memories.Archived,
+			"expired_published": stats.Memories.ExpiredPublished,
+		},
+		"recent_failures": map[string]interface{}{
+			"last_24h":        stats.Failures.Last24h,
+			"last_7d":         stats.Failures.Last7d,
+			"last_failure_at": formatStatsTimeRFC3339(stats.Failures.LastFailure),
+		},
+	}
+	b, err := json.Marshal(payload)
+	if err != nil {
+		toolLog(meta, "encode", "failed")
+		return nil, errors.New(toolFailure(meta, "encode", err))
+	}
 	toolLog(meta, stage, "ok")
 
 	return []mcp.ResourceContents{
-		mcp.TextResourceContents{URI: "memory://stats", MIMEType: "application/json", Text: json},
+		mcp.TextResourceContents{URI: "memory://stats", MIMEType: "application/json", Text: string(b)},
 	}, nil
+}
+
+func formatTopLanguages(stats []store.LanguageStat) string {
+	if len(stats) == 0 {
+		return "  none"
+	}
+
+	lines := make([]string, 0, len(stats))
+	for _, s := range stats {
+		lines = append(lines, fmt.Sprintf("  - %s: %d chunks (%d files)", s.Language, s.Chunks, s.Files))
+	}
+	return strings.Join(lines, "\n")
+}
+
+func formatStatsTime(ts time.Time) string {
+	if ts.IsZero() {
+		return "n/a"
+	}
+	return ts.Format("2006-01-02 15:04:05")
+}
+
+func formatStatsTimeRFC3339(ts time.Time) string {
+	if ts.IsZero() {
+		return ""
+	}
+	return ts.UTC().Format(time.RFC3339)
 }
 
 func detectContradiction(candidate string, memories []store.MemoryRecord) (string, string) {
@@ -520,7 +604,7 @@ func (s *Server) publishProposal(ctx context.Context, proposalID string) (string
 	if !s.verifier.VerifyAll(proposal.Citations) {
 		reason := "citation verification failed: cited lines no longer match current code"
 		_ = s.db.RejectMemoryProposal(ctx, proposalID, reason)
-		return "", fmt.Errorf(reason)
+		return "", errors.New(reason)
 	}
 
 	memories, err := s.db.LoadActiveMemories(ctx)
