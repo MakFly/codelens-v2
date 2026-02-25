@@ -47,10 +47,14 @@ fi
 tmp_codex="$(mktemp)"
 awk '
   BEGIN { skip = 0 }
-  /^[[:space:]]*\[mcp_servers\.codelens\][[:space:]]*$/ { skip = 1; next }
+  /^[[:space:]]*\[mcp_servers\.codelens(\.env)?\][[:space:]]*$/ { skip = 1; next }
   {
     if (skip == 1) {
       if ($0 ~ /^[[:space:]]*\[[^]]+\][[:space:]]*$/) {
+        if ($0 ~ /^[[:space:]]*\[mcp_servers\.codelens(\.env)?\][[:space:]]*$/) {
+          skip = 1
+          next
+        }
         skip = 0
       } else {
         next
@@ -70,7 +74,6 @@ args = ["serve"]
 [mcp_servers.codelens.env]
 CODELENS_OLLAMA_MODEL = "nomic-embed-text"
 CODELENS_OLLAMA_URL = "http://localhost:11434"
-CODELENS_PROJECT = "$PROJECT_PATH"
 TOML
 
 echo "Updated $CODEX_CONFIG"
