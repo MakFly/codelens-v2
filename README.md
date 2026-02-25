@@ -272,6 +272,7 @@ make bench
 | `CODELENS_DB_PATH` | `.codelens/index.db` | SQLite database path |
 | `CODELENS_OLLAMA_URL` | `http://127.0.0.1:11434` | Ollama server URL |
 | `CODELENS_OLLAMA_MODEL` | `nomic-embed-text` | Embedding model |
+| `CODELENS_OLLAMA_AUTOSTART` | `true` | Auto-start local `ollama serve` on connection failure (`0/false` to disable) |
 | `CODELENS_PROFILE` | `auto` | Runtime profile: `auto|low|balanced|high` |
 | `CODELENS_MAX_CPU_THREADS` | `0` | Max CPU threads per embed request (`0` = profile default) |
 | `CODELENS_TOOL_TIMEOUT` | `20s` | MCP tool timeout |
@@ -328,6 +329,16 @@ codelens serve
 If you see `dial tcp [::1]:11434: connect: connection refused`, force IPv4:
 ```bash
 export CODELENS_OLLAMA_URL=http://127.0.0.1:11434
+```
+
+If Ollama is down or unstable, CodeLens now attempts self-heal:
+1. Auto-start local `ollama serve`
+2. Retry the embedding call once
+3. Fall back to lexical search if embeddings are still unavailable
+
+Disable auto-start if needed:
+```bash
+export CODELENS_OLLAMA_AUTOSTART=false
 ```
 
 ### "No results from search_codebase"

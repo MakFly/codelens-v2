@@ -73,6 +73,9 @@ func TestResolveProjectPathAutoNearestCodelensFromCwd(t *testing.T) {
 
 func TestResolveProjectPathFallbackToCwdWhenNoCodelens(t *testing.T) {
 	cwd := t.TempDir()
+	if ancestor, ok := findIndexedAncestor(cwd); ok {
+		t.Skipf("environment has indexed ancestor %q; fallback scenario not deterministic", ancestor)
+	}
 
 	got, err := resolveProjectPath(".", false, "", false, cwd)
 	if err != nil {
@@ -83,6 +86,25 @@ func TestResolveProjectPathFallbackToCwdWhenNoCodelens(t *testing.T) {
 	}
 	if got.Path != cwd {
 		t.Fatalf("expected path=%q, got %q", cwd, got.Path)
+	}
+}
+
+func findIndexedAncestor(start string) (string, bool) {
+	absStart, err := filepath.Abs(start)
+	if err != nil {
+		return "", false
+	}
+	current := filepath.Clean(absStart)
+	for {
+		dbPath := filepath.Join(current, ".codelens", "index.db")
+		if fi, statErr := os.Stat(dbPath); statErr == nil && !fi.IsDir() {
+			return current, true
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return "", false
+		}
+		current = parent
 	}
 }
 

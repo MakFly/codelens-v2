@@ -88,3 +88,28 @@ func TestIndexAll_RecordsAndSkipsFailures(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 1, dbStats.FailedFiles)
 }
+
+func TestSearch_FallbacksToLexicalWhenEmbedderFails(t *testing.T) {
+	t.Setenv("CODELENS_SKIP_LOCK_CHECK", "1")
+	tmp := t.TempDir()
+	db, err := store.Open(filepath.Join(tmp, ".codelens", "index.db"))
+	require.NoError(t, err)
+	defer db.Close()
+
+	require.NoError(t, os.WriteFile(filepath.Join(tmp, "search.go"), []byte(`package main
+func BuildEmbeddingClient() {
+	println("embedding client bootstrap")
+}
+`), 0644))
+
+	idx, err := New(tmp, db, &lengthLimitedEmbedder{maxLines: 100, failOn: "lookupquery"})
+	require.NoError(t, err)
+
+	_, err = idx.IndexAll(context.Background(), true)
+	require.NoError(t, err)
+
+	results, err := idx.Search(context.Background(), "lookupquery embedding client", 5)
+	require.NoError(t, err)
+	require.NotEmpty(t, results)
+	require.Contains(t, strings.ToLower(results[0].Content), "embedding client")
+}

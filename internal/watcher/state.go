@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -23,6 +24,8 @@ type State struct {
 	Interval            string    `json:"interval"`
 }
 
+var stateWriteMu sync.Mutex
+
 func loadState(path string) (State, error) {
 	var s State
 	b, err := os.ReadFile(path)
@@ -36,6 +39,9 @@ func loadState(path string) (State, error) {
 }
 
 func saveState(path string, state State) error {
+	stateWriteMu.Lock()
+	defer stateWriteMu.Unlock()
+
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		return err
 	}

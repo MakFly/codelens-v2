@@ -7,8 +7,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -21,6 +26,12 @@ type OllamaClient struct {
 	dims       int
 	numThreads int
 	maxConc    int
+	autoStart  bool
+
+	startMu          sync.Mutex
+	lastStartAttempt time.Time
+	pullMu           sync.Mutex
+	lastPullAttempt  time.Time
 }
 
 func NewOllama(baseURL, model string) *OllamaClient {
@@ -30,8 +41,9 @@ func NewOllama(baseURL, model string) *OllamaClient {
 		httpClient: &http.Client{
 			Timeout: 20 * time.Second,
 		},
-		dims:    defaultDimensions,
-		maxConc: 4,
+		dims:      defaultDimensions,
+		maxConc:   4,
+		autoStart: isAutoStartEnabled(),
 	}
 }
 
@@ -139,34 +151,51 @@ func (o *OllamaClient) embedLegacy(ctx context.Context, reqBody ollamaEmbedReque
 }
 
 func (o *OllamaClient) doJSON(ctx context.Context, path string, body []byte) (*http.Response, error) {
-	req, err := http.NewRequestWithContext(ctx, "POST", o.baseURL+path, bytes.NewReader(body))
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := o.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("ollama request failed: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		raw, _ := io.ReadAll(resp.Body)
-		var apiErr ollamaErrorResponse
-		_ = json.Unmarshal(raw, &apiErr)
-		_ = resp.Body.Close()
-		lowerAPIErr := strings.ToLower(apiErr.Error)
-		lowerRaw := strings.ToLower(strings.TrimSpace(string(raw)))
-		if strings.Contains(lowerAPIErr, "context length") || strings.Contains(lowerRaw, "context length") {
-			return nil, fmt.Errorf("%w: %s", ErrContextLengthExceeded, apiErr.Error)
+	// One retry is intentional for self-healing:
+	// - First failure may happen when local Ollama daemon is down
+	// - First 404 may happen when the embedding model is not pulled yet
+	for attempt := 0; attempt < 2; attempt++ {
+		req, err := http.NewRequestWithContext(ctx, "POST", o.baseURL+path, bytes.NewReader(body))
+		if err != nil {
+			return nil, err
 		}
-		if apiErr.Error != "" {
-			return nil, &ollamaHTTPError{Status: resp.StatusCode, Msg: apiErr.Error}
+		req.Header.Set("Content-Type", "application/json")
+
+		resp, err := o.httpClient.Do(req)
+		if err != nil {
+			if attempt == 0 && o.autoStart && isConnectionRefused(err) {
+				if recoverErr := o.recoverConnection(ctx); recoverErr == nil {
+					continue
+				}
+			}
+			return nil, fmt.Errorf("ollama request failed: %w", err)
 		}
-		msg := strings.TrimSpace(string(raw))
-		return nil, &ollamaHTTPError{Status: resp.StatusCode, Msg: msg}
+
+		if resp.StatusCode != http.StatusOK {
+			raw, _ := io.ReadAll(resp.Body)
+			var apiErr ollamaErrorResponse
+			_ = json.Unmarshal(raw, &apiErr)
+			_ = resp.Body.Close()
+			lowerAPIErr := strings.ToLower(apiErr.Error)
+			lowerRaw := strings.ToLower(strings.TrimSpace(string(raw)))
+			if strings.Contains(lowerAPIErr, "context length") || strings.Contains(lowerRaw, "context length") {
+				return nil, fmt.Errorf("%w: %s", ErrContextLengthExceeded, apiErr.Error)
+			}
+			if attempt == 0 && o.autoStart && isModelMissing(lowerAPIErr, lowerRaw) {
+				if pullErr := o.pullModel(ctx); pullErr == nil {
+					continue
+				}
+			}
+			if apiErr.Error != "" {
+				return nil, &ollamaHTTPError{Status: resp.StatusCode, Msg: apiErr.Error}
+			}
+			msg := strings.TrimSpace(string(raw))
+			return nil, &ollamaHTTPError{Status: resp.StatusCode, Msg: msg}
+		}
+		return resp, nil
 	}
-	return resp, nil
+
+	return nil, fmt.Errorf("ollama request failed after retry")
 }
 
 func shouldFallbackToLegacy(err error) bool {
@@ -259,4 +288,157 @@ func (o *OllamaClient) SetMaxConcurrent(n int) {
 		n = 1
 	}
 	o.maxConc = n
+}
+
+func isAutoStartEnabled() bool {
+	v := strings.TrimSpace(strings.ToLower(os.Getenv("CODELENS_OLLAMA_AUTOSTART")))
+	if v == "" {
+		return true
+	}
+	switch v {
+	case "0", "false", "no", "off":
+		return false
+	default:
+		return true
+	}
+}
+
+func isConnectionRefused(err error) bool {
+	if err == nil {
+		return false
+	}
+	var netErr *net.OpError
+	if errors.As(err, &netErr) {
+		if strings.Contains(strings.ToLower(netErr.Err.Error()), "connection refused") {
+			return true
+		}
+	}
+	lower := strings.ToLower(err.Error())
+	return strings.Contains(lower, "connection refused") || strings.Contains(lower, "connect: cannot assign requested address")
+}
+
+func isModelMissing(lowerAPIErr, lowerRaw string) bool {
+	return strings.Contains(lowerAPIErr, "model") && strings.Contains(lowerAPIErr, "not found") ||
+		strings.Contains(lowerRaw, "model") && strings.Contains(lowerRaw, "not found")
+}
+
+func (o *OllamaClient) recoverConnection(ctx context.Context) error {
+	if err := o.waitForHealthy(ctx, 500*time.Millisecond); err == nil {
+		return nil
+	}
+	if err := o.startLocalOllama(); err != nil {
+		return err
+	}
+	return o.waitForHealthy(ctx, 3*time.Second)
+}
+
+func (o *OllamaClient) startLocalOllama() error {
+	o.startMu.Lock()
+	defer o.startMu.Unlock()
+
+	now := time.Now()
+	if !o.lastStartAttempt.IsZero() && now.Sub(o.lastStartAttempt) < 3*time.Second {
+		return fmt.Errorf("ollama startup already attempted recently")
+	}
+	o.lastStartAttempt = now
+
+	cmd := exec.Command("ollama", "serve")
+	cmd.Env = withOllamaDefaults(os.Environ())
+	cmd.Stdout = io.Discard
+	cmd.Stderr = io.Discard
+
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("start local ollama serve: %w", err)
+	}
+	if cmd.Process != nil {
+		_ = cmd.Process.Release()
+	}
+	return nil
+}
+
+func withOllamaDefaults(env []string) []string {
+	current := map[string]string{}
+	for _, kv := range env {
+		idx := strings.Index(kv, "=")
+		if idx <= 0 {
+			continue
+		}
+		current[kv[:idx]] = kv[idx+1:]
+	}
+	if current["HOME"] == "" {
+		if home, err := os.UserHomeDir(); err == nil && strings.TrimSpace(home) != "" {
+			env = append(env, "HOME="+home)
+			current["HOME"] = home
+		}
+	}
+	if current["OLLAMA_MODELS"] == "" && current["HOME"] != "" {
+		env = append(env, "OLLAMA_MODELS="+filepath.Join(current["HOME"], ".ollama", "models"))
+	}
+	return env
+}
+
+func (o *OllamaClient) waitForHealthy(ctx context.Context, timeout time.Duration) error {
+	if timeout <= 0 {
+		timeout = 5 * time.Second
+	}
+	waitCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	ticker := time.NewTicker(200 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		if err := o.ping(waitCtx); err == nil {
+			return nil
+		}
+		select {
+		case <-waitCtx.Done():
+			return fmt.Errorf("ollama is not reachable at %s", o.baseURL)
+		case <-ticker.C:
+		}
+	}
+}
+
+func (o *OllamaClient) ping(ctx context.Context) error {
+	req, err := http.NewRequestWithContext(ctx, "GET", strings.TrimRight(o.baseURL, "/")+"/api/version", nil)
+	if err != nil {
+		return err
+	}
+	resp, err := o.httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("unexpected status: %d", resp.StatusCode)
+	}
+	return nil
+}
+
+func (o *OllamaClient) pullModel(ctx context.Context) error {
+	o.pullMu.Lock()
+	defer o.pullMu.Unlock()
+
+	now := time.Now()
+	if !o.lastPullAttempt.IsZero() && now.Sub(o.lastPullAttempt) < 20*time.Second {
+		return fmt.Errorf("model pull already attempted recently")
+	}
+	o.lastPullAttempt = now
+
+	pullCtx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(pullCtx, "ollama", "pull", o.model)
+	cmd.Env = withOllamaDefaults(os.Environ())
+	cmd.Stdout = io.Discard
+	cmd.Stderr = io.Discard
+	if err := cmd.Run(); err != nil {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+		return fmt.Errorf("pull model %q: %w", o.model, err)
+	}
+	return nil
 }

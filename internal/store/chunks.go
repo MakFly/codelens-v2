@@ -144,6 +144,29 @@ func (db *DB) GetChunksByIDs(ctx context.Context, ids []string) ([]ChunkRecord, 
 	return chunks, rows.Err()
 }
 
+// LoadAllChunks loads all indexed chunks (without embeddings).
+func (db *DB) LoadAllChunks(ctx context.Context) ([]ChunkRecord, error) {
+	rows, err := db.conn.QueryContext(ctx, `
+		SELECT id, file_path, start_line, end_line, content, language, symbol, symbol_kind, hash
+		FROM chunks
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var chunks []ChunkRecord
+	for rows.Next() {
+		var c ChunkRecord
+		if err := rows.Scan(&c.ID, &c.FilePath, &c.StartLine, &c.EndLine,
+			&c.Content, &c.Language, &c.Symbol, &c.SymbolKind, &c.Hash); err != nil {
+			return nil, err
+		}
+		chunks = append(chunks, c)
+	}
+	return chunks, rows.Err()
+}
+
 // --- Serialization helpers ---
 
 func float32SliceToBlob(f []float32) []byte {

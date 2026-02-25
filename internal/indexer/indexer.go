@@ -367,7 +367,7 @@ func (i *Indexer) Search(ctx context.Context, query string, topK int) ([]SearchR
 
 	qv, err := i.embedder.Embed(ctx, query)
 	if err != nil {
-		return nil, err
+		return i.lexicalSearch(ctx, query, topK)
 	}
 
 	records, err := i.db.LoadAllEmbeddings(ctx)
@@ -375,7 +375,7 @@ func (i *Indexer) Search(ctx context.Context, query string, topK int) ([]SearchR
 		return nil, err
 	}
 	if len(records) == 0 {
-		return []SearchResult{}, nil
+		return i.lexicalSearch(ctx, query, topK)
 	}
 
 	type scored struct {
@@ -434,6 +434,90 @@ func (i *Indexer) Search(ctx context.Context, query string, topK int) ([]SearchR
 	}
 
 	return results, nil
+}
+
+func (i *Indexer) lexicalSearch(ctx context.Context, query string, topK int) ([]SearchResult, error) {
+	chunks, err := i.db.LoadAllChunks(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if len(chunks) == 0 {
+		return []SearchResult{}, nil
+	}
+
+	tokens := tokenizeQuery(query)
+	if len(tokens) == 0 {
+		return []SearchResult{}, nil
+	}
+
+	type scored struct {
+		chunk store.ChunkRecord
+		score float32
+	}
+	scoredChunks := make([]scored, 0, len(chunks))
+
+	for _, c := range chunks {
+		haystack := strings.ToLower(c.FilePath + "\n" + c.Symbol + "\n" + c.Content)
+		var score float32
+		for _, tok := range tokens {
+			hits := strings.Count(haystack, tok)
+			if hits == 0 {
+				continue
+			}
+			weight := float32(1)
+			if strings.Contains(strings.ToLower(c.Symbol), tok) {
+				weight += 0.75
+			}
+			if strings.Contains(strings.ToLower(c.FilePath), tok) {
+				weight += 0.35
+			}
+			score += float32(hits) * weight
+		}
+		if score <= 0 {
+			continue
+		}
+		scoredChunks = append(scoredChunks, scored{chunk: c, score: score})
+	}
+
+	if len(scoredChunks) == 0 {
+		return []SearchResult{}, nil
+	}
+
+	sort.Slice(scoredChunks, func(a, b int) bool {
+		return scoredChunks[a].score > scoredChunks[b].score
+	})
+	if topK > len(scoredChunks) {
+		topK = len(scoredChunks)
+	}
+
+	results := make([]SearchResult, 0, topK)
+	for _, s := range scoredChunks[:topK] {
+		results = append(results, SearchResult{
+			ChunkID:    s.chunk.ID,
+			FilePath:   s.chunk.FilePath,
+			StartLine:  s.chunk.StartLine,
+			EndLine:    s.chunk.EndLine,
+			Content:    s.chunk.Content,
+			Language:   s.chunk.Language,
+			Symbol:     s.chunk.Symbol,
+			SymbolKind: s.chunk.SymbolKind,
+			Score:      s.score,
+		})
+	}
+	return results, nil
+}
+
+func tokenizeQuery(query string) []string {
+	raw := strings.Fields(strings.ToLower(query))
+	out := make([]string, 0, len(raw))
+	for _, tok := range raw {
+		tok = strings.Trim(tok, ".,:;!?()[]{}<>\"'`")
+		if len(tok) < 2 {
+			continue
+		}
+		out = append(out, tok)
+	}
+	return out
 }
 
 func (i *Indexer) SearchInFile(ctx context.Context, path, query string, topK int) ([]SearchResult, error) {
