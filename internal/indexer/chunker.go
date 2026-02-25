@@ -3,6 +3,7 @@ package indexer
 import (
 	"crypto/sha256"
 	"fmt"
+	"regexp"
 	"strings"
 
 	"github.com/cespare/xxhash/v2"
@@ -45,18 +46,28 @@ func ChunkFile(filePath, content, language string) []Chunk {
 	switch language {
 	case "php":
 		chunks = chunkPHP(filePath, lines)
-		if len(chunks) > 0 {
-			break
-		}
 	case "typescript", "javascript", "tsx", "jsx":
 		chunks = chunkTypeScript(filePath, lines)
-		if len(chunks) > 0 {
-			break
-		}
 	case "go":
 		chunks = chunkGo(filePath, lines)
-		if len(chunks) > 0 {
-			break
+	case "python":
+		chunks = chunkPython(filePath, lines)
+	case "java":
+		chunks = chunkJava(filePath, lines)
+	case "ruby":
+		chunks = chunkRuby(filePath, lines)
+	case "rust":
+		chunks = chunkRust(filePath, lines)
+	case "csharp":
+		chunks = chunkCSharp(filePath, lines)
+	case "vue", "svelte":
+		scriptLines, scriptStart := extractScriptSection(lines)
+		if len(scriptLines) > 0 {
+			chunks = chunkTypeScript(filePath, scriptLines)
+			for i := range chunks {
+				chunks[i].StartLine += scriptStart
+				chunks[i].EndLine += scriptStart
+			}
 		}
 	}
 
@@ -158,4 +169,23 @@ type symbolBoundary struct {
 	end    int
 	symbol string
 	kind   string
+}
+
+var scriptTagOpen = regexp.MustCompile(`<script[^>]*>`)
+var scriptTagClose = regexp.MustCompile(`</script>`)
+
+// extractScriptSection extracts the lines between <script> and </script> tags
+// in Vue/Svelte SFCs, returning the lines and the 0-based offset of the first line.
+func extractScriptSection(lines []string) ([]string, int) {
+	startIdx := -1
+	for i, line := range lines {
+		if scriptTagOpen.MatchString(line) {
+			startIdx = i + 1
+			continue
+		}
+		if startIdx >= 0 && scriptTagClose.MatchString(line) {
+			return lines[startIdx:i], startIdx
+		}
+	}
+	return nil, 0
 }

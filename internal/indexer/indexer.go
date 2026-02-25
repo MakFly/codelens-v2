@@ -46,6 +46,41 @@ var excludedRootDirs = map[string]struct{}{
 	"logs":         {},
 	"log":          {},
 	"storage":      {},
+	// Frontend build/cache
+	".output":       {},
+	".svelte-kit":   {},
+	".parcel-cache": {},
+	".cache":        {},
+	".vercel":       {},
+	".netlify":      {},
+	"out":           {},
+	// Python
+	"__pycache__":    {},
+	".pytest_cache":  {},
+	"__pypackages__": {},
+	".mypy_cache":    {},
+	".ruff_cache":    {},
+	".venv":          {},
+	"venv":           {},
+	// Java/Kotlin/Maven/Gradle
+	"target":  {},
+	".gradle": {},
+	// C#/.NET
+	"obj": {},
+	// Ruby
+	".bundle": {},
+	// IDEs
+	".idea":    {},
+	".vscode":  {},
+	".fleet":   {},
+	".zed":     {},
+	".history": {},
+	// Infrastructure/DevOps
+	".serverless": {},
+	".terraform":  {},
+	"cdk.out":     {},
+	// Misc
+	".temp": {},
 }
 
 var excludedPathPrefixes = []string{
@@ -53,12 +88,52 @@ var excludedPathPrefixes = []string{
 	"public/bundles/",
 	"public/build/",
 	"public/assets/",
+	".phpunit.cache/",
 }
 
 var excludedFileSuffixes = []string{
 	".min.js",
 	".min.css",
 	".map",
+	// Compiled/binary artifacts
+	".pyc", ".pyo", ".class",
+	".dll", ".exe", ".so", ".dylib", ".o", ".a",
+	// Generated JS bundles
+	".chunk.js", ".bundle.js",
+	// Binary/media
+	".wasm",
+	".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".webp",
+	".woff", ".woff2", ".ttf", ".eot",
+	".pdf", ".zip", ".tar", ".gz", ".bz2", ".xz",
+	// Database/data files
+	".sqlite", ".sqlite3", ".db", ".bin", ".dat",
+	// Serialized
+	".pb", ".pbf",
+}
+
+var excludedFileNames = map[string]struct{}{
+	// Lock files (large, auto-generated, no semantic value)
+	"package-lock.json": {},
+	"yarn.lock":         {},
+	"pnpm-lock.yaml":    {},
+	"composer.lock":     {},
+	"Gemfile.lock":      {},
+	"poetry.lock":       {},
+	"Pipfile.lock":      {},
+	"bun.lockb":         {},
+	"bun.lock":          {},
+	"pdm.lock":          {},
+	"uv.lock":           {},
+	"shrinkwrap.yaml":   {},
+	// Credentials/secrets
+	".env":                 {},
+	".htpasswd":            {},
+	".htaccess":            {},
+	".npmrc":               {},
+	".pypirc":              {},
+	"credentials.json":     {},
+	"secrets.json":         {},
+	"service-account.json": {},
 }
 
 type IndexStats struct {
@@ -613,17 +688,67 @@ func (i *Indexer) IndexedFileCount() int {
 }
 
 func languageFromPath(path string) string {
+	// Detection by filename
+	base := strings.ToLower(filepath.Base(path))
+	switch {
+	case base == "dockerfile" || strings.HasPrefix(base, "dockerfile."):
+		return "dockerfile"
+	case base == "makefile":
+		return "makefile"
+	}
+
+	// Detection by extension
 	switch strings.ToLower(filepath.Ext(path)) {
+	// Existing chunkers
 	case ".go":
 		return "go"
 	case ".php":
 		return "php"
-	case ".ts", ".tsx", ".js", ".jsx":
+	case ".ts", ".tsx", ".js", ".jsx", ".mjs", ".mts", ".cjs", ".cts":
 		return "typescript"
-	case ".py":
+	case ".py", ".pyi", ".pyw":
 		return "python"
 	case ".java":
 		return "java"
+	// New chunkers
+	case ".rb", ".rake", ".gemspec":
+		return "ruby"
+	case ".rs":
+		return "rust"
+	case ".cs":
+		return "csharp"
+	// SFC (script extraction before TS chunking)
+	case ".vue":
+		return "vue"
+	case ".svelte":
+		return "svelte"
+	// Generic (no dedicated chunker)
+	case ".yaml", ".yml":
+		return "yaml"
+	case ".toml":
+		return "toml"
+	case ".json", ".jsonc":
+		return "json"
+	case ".md", ".mdx":
+		return "markdown"
+	case ".sql":
+		return "sql"
+	case ".sh", ".bash", ".zsh":
+		return "shell"
+	case ".css", ".scss", ".sass", ".less":
+		return "css"
+	case ".html", ".htm":
+		return "html"
+	case ".xml", ".xsl":
+		return "xml"
+	case ".graphql", ".gql":
+		return "graphql"
+	case ".proto":
+		return "protobuf"
+	case ".twig":
+		return "twig"
+	case ".dockerfile":
+		return "dockerfile"
 	default:
 		return ""
 	}
@@ -683,16 +808,17 @@ func shouldSkipDir(rel string) bool {
 	if rel == "." {
 		return false
 	}
-	root := rel
-	if idx := strings.IndexByte(rel, '/'); idx >= 0 {
-		root = rel[:idx]
-	}
-	root = strings.ToLower(root)
-	if _, ok := excludedRootDirs[root]; ok {
-		return true
+	lower := strings.ToLower(rel)
+
+	// Check every path component against excludedRootDirs
+	parts := strings.Split(lower, "/")
+	for _, part := range parts {
+		if _, ok := excludedRootDirs[part]; ok {
+			return true
+		}
 	}
 
-	lower := strings.ToLower(rel)
+	// Check path prefixes
 	for _, p := range excludedPathPrefixes {
 		if strings.HasPrefix(lower, p) {
 			return true
@@ -716,7 +842,19 @@ func isFileBeingWritten(path string) bool {
 }
 
 func shouldSkipFile(rel string) bool {
+	base := filepath.Base(rel)
 	lower := strings.ToLower(rel)
+
+	// Exact filename exclusions
+	if _, ok := excludedFileNames[base]; ok {
+		return true
+	}
+
+	// Sensitive file patterns
+	if isSensitiveFile(base) {
+		return true
+	}
+
 	for _, p := range excludedPathPrefixes {
 		if strings.HasPrefix(lower, p) {
 			return true
@@ -727,6 +865,36 @@ func shouldSkipFile(rel string) bool {
 			return true
 		}
 	}
+	return false
+}
+
+var sensitiveFileSuffixes = []string{
+	".pem", ".key", ".crt", ".p12", ".pfx", ".ppk", ".asc", ".gpg",
+}
+
+func isSensitiveFile(basename string) bool {
+	lower := strings.ToLower(basename)
+
+	// .env variants (.env, .env.local, .env.production, etc.)
+	if strings.HasPrefix(lower, ".env") {
+		return true
+	}
+
+	// Private keys and certificates
+	for _, s := range sensitiveFileSuffixes {
+		if strings.HasSuffix(lower, s) {
+			return true
+		}
+	}
+
+	// SSH private keys (exclude .pub which are public)
+	sshPrefixes := []string{"id_rsa", "id_ed25519", "id_dsa", "id_ecdsa"}
+	for _, prefix := range sshPrefixes {
+		if strings.HasPrefix(lower, prefix) && !strings.HasSuffix(lower, ".pub") {
+			return true
+		}
+	}
+
 	return false
 }
 
