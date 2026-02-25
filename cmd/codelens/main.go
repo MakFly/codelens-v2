@@ -473,6 +473,34 @@ func runStats(cmd *cobra.Command, args []string) error {
 	fmt.Printf("Failed:     %d\n", stats.FailedFiles)
 	fmt.Printf("Memories:   %d (active)\n", stats.ActiveMemories)
 	fmt.Printf("Last index: %s\n", stats.LastIndexed.Format("2006-01-02 15:04:05"))
+	fmt.Printf("\nCoverage\n")
+	fmt.Printf("--------\n")
+	fmt.Printf("Embedded:  %d/%d chunks\n", stats.EmbeddedChunks, stats.Chunks)
+	fmt.Printf("Coverage:  %.1f%%\n", stats.EmbeddingCoveragePct)
+	fmt.Printf("Avg/file:  %.2f chunks\n", stats.AvgChunksPerFile)
+
+	fmt.Printf("\nTop Languages\n")
+	fmt.Printf("-------------\n")
+	if len(stats.TopLanguages) == 0 {
+		fmt.Printf("none\n")
+	} else {
+		for _, lang := range stats.TopLanguages {
+			fmt.Printf("%-12s %5d chunks (%d files)\n", lang.Language+":", lang.Chunks, lang.Files)
+		}
+	}
+
+	fmt.Printf("\nMemory Pipeline\n")
+	fmt.Printf("---------------\n")
+	fmt.Printf("Proposals: pending=%d published=%d rejected=%d\n",
+		stats.MemoryProposals.Pending, stats.MemoryProposals.Published, stats.MemoryProposals.Rejected)
+	fmt.Printf("Lifecycle: archived=%d expired=%d\n",
+		stats.Memories.Archived, stats.Memories.ExpiredPublished)
+
+	fmt.Printf("\nRecent Failures\n")
+	fmt.Printf("---------------\n")
+	fmt.Printf("24h:       %d\n", stats.Failures.Last24h)
+	fmt.Printf("7d:        %d\n", stats.Failures.Last7d)
+	fmt.Printf("Last fail: %s\n", formatMaybeTime(stats.Failures.LastFailure))
 	return nil
 }
 
@@ -1072,4 +1100,11 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return s[:n] + "..."
+}
+
+func formatMaybeTime(ts time.Time) string {
+	if ts.IsZero() {
+		return "n/a"
+	}
+	return ts.Format("2006-01-02 15:04:05")
 }

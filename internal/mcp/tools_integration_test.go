@@ -13,6 +13,7 @@ import (
 	gmc "github.com/mark3labs/mcp-go/mcp"
 	"github.com/yourusername/codelens/internal/embeddings"
 	"github.com/yourusername/codelens/internal/indexer"
+	"github.com/yourusername/codelens/internal/jit"
 	"github.com/yourusername/codelens/internal/store"
 )
 
@@ -215,5 +216,70 @@ func TestMemoryFlow_AutoOverrideSameTopic(t *testing.T) {
 	}
 	if !strings.Contains(active[0].Insight, "unique point d'entrée") {
 		t.Fatalf("expected newest memory to be active, got: %s", active[0].Insight)
+	}
+}
+
+func TestResourceStats_ContainsEnrichedFields(t *testing.T) {
+	tmp := t.TempDir()
+	file := filepath.Join(tmp, "sample.go")
+	content := "package main\nfunc main(){}\n"
+	if err := os.WriteFile(file, []byte(content), 0644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+
+	db, err := store.Open(filepath.Join(tmp, ".codelens", "index.db"))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer db.Close()
+
+	embedder := embeddings.NewMock(64)
+	idx, err := indexer.New(tmp, db, embedder)
+	if err != nil {
+		t.Fatalf("new indexer: %v", err)
+	}
+	if _, err := idx.IndexAll(context.Background(), true); err != nil {
+		t.Fatalf("index all: %v", err)
+	}
+	if err := db.RecordIndexFailure(context.Background(), "broken.go", "parse failure"); err != nil {
+		t.Fatalf("record failure: %v", err)
+	}
+	proposalID, err := db.SaveMemoryProposal(context.Background(), "proposal", "insight", []jit.Citation{
+		{FilePath: "sample.go", LineStart: 1, LineEnd: 2, Hash: "h1"},
+	})
+	if err != nil {
+		t.Fatalf("save proposal: %v", err)
+	}
+	if _, err := db.PublishMemoryProposal(context.Background(), proposalID); err != nil {
+		t.Fatalf("publish proposal: %v", err)
+	}
+
+	srv := NewServer(db, idx, embedder)
+	contents, err := srv.handleResourceStats(context.Background(), gmc.ReadResourceRequest{})
+	if err != nil {
+		t.Fatalf("resource stats error: %v", err)
+	}
+	if len(contents) != 1 {
+		t.Fatalf("expected one resource content, got %d", len(contents))
+	}
+
+	textContent, ok := contents[0].(gmc.TextResourceContents)
+	if !ok {
+		t.Fatalf("expected TextResourceContents, got %#v", contents[0])
+	}
+
+	var payload map[string]interface{}
+	if err := json.Unmarshal([]byte(textContent.Text), &payload); err != nil {
+		t.Fatalf("invalid json payload: %v", err)
+	}
+
+	for _, k := range []string{
+		"files", "chunks", "failed_files", "active_memories", "last_indexed",
+		"embedded_chunks", "embedding_coverage_pct", "avg_chunks_per_file",
+		"top_languages", "memory_proposals", "memories", "recent_failures",
+	} {
+		if _, ok := payload[k]; !ok {
+			t.Fatalf("missing expected key %q in payload: %v", k, payload)
+		}
 	}
 }
