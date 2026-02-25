@@ -3,7 +3,6 @@ set -euo pipefail
 
 CODELENS_BIN="${CODELENS_BIN:-$HOME/.local/bin/codelens}"
 HOOK_BIN="${HOOK_BIN:-$HOME/.local/bin/codelens-hook}"
-PROJECT_PATH="${1:-$PWD}"
 
 if ! command -v jq >/dev/null 2>&1; then
   echo "jq is required" >&2
@@ -90,21 +89,14 @@ fi
 tmp_open="$(mktemp)"
 jq \
   --arg codelens "$CODELENS_BIN" \
-  --arg project "$PROJECT_PATH" \
   --arg ollama "http://localhost:11434" \
   --arg model "nomic-embed-text" \
-  --arg instr1 "~/.claude/CLAUDE.md" \
-  --arg instr2 "$PROJECT_PATH/AGENTS.md" \
   '
-  .instructions = (
-    ((.instructions // []) + [$instr1, $instr2]) | unique
-  ) |
   .mcp = (.mcp // {}) |
   .mcp.codelens = {
     "type": "local",
     "command": [
       "env",
-      ("CODELENS_PROJECT=" + $project),
       ("CODELENS_OLLAMA_URL=" + $ollama),
       ("CODELENS_OLLAMA_MODEL=" + $model),
       $codelens,

@@ -301,6 +301,7 @@ func init() {
 
 	indexCmd.Flags().BoolP("watch", "w", false, "Watch for file changes after initial index (Ctrl+C to stop)")
 	indexCmd.Flags().BoolP("force", "f", false, "Re-index all files even if hash unchanged")
+	indexCmd.Flags().Bool("status", false, "Show current indexing progress and exit")
 	updateCmd.Flags().String("version", "latest", "Version to install: latest or semver (e.g. 0.2.3)")
 	updateCmd.Flags().String("install-dir", "", "Install directory (default: ~/.local/bin)")
 
@@ -406,6 +407,11 @@ func runIndex(cmd *cobra.Command, args []string) error {
 		path = args[0]
 	}
 
+	statusFlag, _ := cmd.Flags().GetBool("status")
+	if statusFlag {
+		return runIndexStatus(path)
+	}
+
 	cfg, err := loadConfig(cmd)
 	if err != nil {
 		return err
@@ -436,8 +442,90 @@ func runIndex(cmd *cobra.Command, args []string) error {
 		"Runtime profile: %s | cpu=%d | mem=%dGiB | ollama_threads=%d | max_concurrent=%d\n",
 		tuning.Profile, tuning.CPUs, tuning.MemoryGiB, tuning.NumThreads, tuning.MaxConcurrent,
 	)
-	fmt.Printf("Indexing %s...\n", path)
-	stats, err := idx.IndexAll(context.Background(), force)
+
+	absPath, _ := filepath.Abs(path)
+	codelensDir := filepath.Join(absPath, ".codelens")
+	isTTY := isTerminal()
+	startedAt := time.Now()
+
+	// Write initial state file.
+	_ = indexer.WriteProgressState(codelensDir, indexer.ProgressState{
+		Running:   true,
+		Phase:     "scanning",
+		StartedAt: startedAt,
+	})
+
+	var progressCb indexer.ProgressCallback
+	if isTTY {
+		progressCb = func(ev indexer.ProgressEvent) {
+			switch ev.Phase {
+			case "scanning":
+				fmt.Fprintf(os.Stderr, "\r\033[KScanning files... %d found", ev.TotalFiles)
+			case "indexing":
+				pct := 0.0
+				if ev.TotalFiles > 0 {
+					pct = float64(ev.ProcessedFiles) / float64(ev.TotalFiles) * 100
+				}
+				bar := progressBar(pct, 20)
+				file := ev.CurrentFile
+				if len(file) > 40 {
+					file = "..." + file[len(file)-37:]
+				}
+				fmt.Fprintf(os.Stderr, "\r\033[KIndexing %s %.0f%% (%d/%d) %s",
+					bar, pct, ev.ProcessedFiles, ev.TotalFiles, file)
+			}
+			// Update state file (best-effort).
+			pct := 0.0
+			if ev.TotalFiles > 0 {
+				pct = float64(ev.ProcessedFiles) / float64(ev.TotalFiles) * 100
+			}
+			_ = indexer.WriteProgressState(codelensDir, indexer.ProgressState{
+				Running:        true,
+				Phase:          ev.Phase,
+				TotalFiles:     ev.TotalFiles,
+				ProcessedFiles: ev.ProcessedFiles,
+				CurrentFile:    ev.CurrentFile,
+				Chunks:         ev.Chunks,
+				FailedFiles:    ev.FailedFiles,
+				StartedAt:      startedAt,
+				Percent:        pct,
+			})
+		}
+	} else {
+		progressCb = func(ev indexer.ProgressEvent) {
+			pct := 0.0
+			if ev.TotalFiles > 0 {
+				pct = float64(ev.ProcessedFiles) / float64(ev.TotalFiles) * 100
+			}
+			_ = indexer.WriteProgressState(codelensDir, indexer.ProgressState{
+				Running:        true,
+				Phase:          ev.Phase,
+				TotalFiles:     ev.TotalFiles,
+				ProcessedFiles: ev.ProcessedFiles,
+				CurrentFile:    ev.CurrentFile,
+				Chunks:         ev.Chunks,
+				FailedFiles:    ev.FailedFiles,
+				StartedAt:      startedAt,
+				Percent:        pct,
+			})
+		}
+	}
+
+	stats, err := idx.IndexAll(context.Background(), force, progressCb)
+
+	// Clear progress line.
+	if isTTY {
+		fmt.Fprintf(os.Stderr, "\r\033[K")
+	}
+
+	// Mark state as done.
+	_ = indexer.WriteProgressState(codelensDir, indexer.ProgressState{
+		Running:   false,
+		Phase:     "done",
+		StartedAt: startedAt,
+		Percent:   100,
+	})
+
 	if err != nil {
 		return fmt.Errorf("index: %w", err)
 	}
@@ -451,6 +539,60 @@ func runIndex(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
+}
+
+func runIndexStatus(path string) error {
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return err
+	}
+	codelensDir := filepath.Join(absPath, ".codelens")
+
+	state, err := indexer.ReadProgressState(codelensDir)
+	if err != nil {
+		fmt.Println("No indexing in progress")
+		return nil
+	}
+	if !state.Running {
+		fmt.Println("No indexing in progress")
+		return nil
+	}
+
+	elapsed := time.Since(state.StartedAt).Truncate(time.Second)
+	fmt.Printf("Indexing in progress...\n")
+	fmt.Printf("Phase:    %s\n", state.Phase)
+	fmt.Printf("Progress: %d/%d files (%.1f%%)\n", state.ProcessedFiles, state.TotalFiles, state.Percent)
+	if state.CurrentFile != "" {
+		fmt.Printf("Current:  %s\n", state.CurrentFile)
+	}
+	fmt.Printf("Chunks:   %d\n", state.Chunks)
+	fmt.Printf("Failed:   %d\n", state.FailedFiles)
+	fmt.Printf("Elapsed:  %s\n", elapsed)
+	return nil
+}
+
+func progressBar(pct float64, width int) string {
+	filled := int(pct / 100 * float64(width))
+	if filled > width {
+		filled = width
+	}
+	bar := make([]byte, width)
+	for i := range bar {
+		if i < filled {
+			bar[i] = '#'
+		} else {
+			bar[i] = '.'
+		}
+	}
+	return "[" + string(bar) + "]"
+}
+
+func isTerminal() bool {
+	fi, err := os.Stderr.Stat()
+	if err != nil {
+		return false
+	}
+	return fi.Mode()&os.ModeCharDevice != 0
 }
 
 func runSearch(cmd *cobra.Command, args []string) error {
@@ -707,15 +849,26 @@ func downloadAndExtractTarGz(url, installDir string) error {
 			continue
 		}
 		dst := filepath.Join(installDir, base)
-		out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o755)
+		// Write to a temp file first to avoid "text file busy" on Linux
+		// when the binary is currently running.
+		tmp := dst + ".update.tmp"
+		out, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o755)
 		if err != nil {
 			return err
 		}
 		if _, err := io.Copy(out, tr); err != nil {
 			_ = out.Close()
+			_ = os.Remove(tmp)
 			return err
 		}
 		if err := out.Close(); err != nil {
+			_ = os.Remove(tmp)
+			return err
+		}
+		// Remove the running binary (allowed on Linux even while executing),
+		// then rename the temp file into place.
+		_ = os.Remove(dst)
+		if err := os.Rename(tmp, dst); err != nil {
 			return err
 		}
 		if err := os.Chmod(dst, 0o755); err != nil {
@@ -860,7 +1013,7 @@ func runWatcherCycle(ctx context.Context, cfg watcher.Config) (int, int, error) 
 	if err != nil {
 		return 0, 0, fmt.Errorf("create indexer: %w", err)
 	}
-	stats, err := idx.IndexAll(ctx, cfg.Force)
+	stats, err := idx.IndexAll(ctx, cfg.Force, nil)
 	if err != nil {
 		return 0, 0, fmt.Errorf("index cycle: %w", err)
 	}
