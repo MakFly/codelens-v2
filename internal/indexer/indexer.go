@@ -192,6 +192,10 @@ func (i *Indexer) ResolvePath(path string) string {
 func (i *Indexer) IndexAll(ctx context.Context, force bool, onProgress ProgressCallback) (*IndexStats, error) {
 	start := time.Now()
 	stats := &IndexStats{}
+
+	// Persist project root in DB metadata for fallback path resolution.
+	_ = i.db.SetMeta("project_root", i.projectRoot)
+
 	if err := i.purgeExcludedArtifacts(ctx); err != nil {
 		return nil, err
 	}

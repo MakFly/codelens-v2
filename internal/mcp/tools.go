@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
@@ -131,6 +132,18 @@ func (s *Server) handleReadFileSmart(ctx context.Context, req mcp.CallToolReques
 	stage = "filesystem"
 	fullPath := s.idx.ResolvePath(path)
 	content, err := os.ReadFile(fullPath)
+	if err != nil && !filepath.IsAbs(path) {
+		// Fallback: try project_root from DB metadata (handles CWD mismatch)
+		if dbRoot, dbErr := s.db.GetMeta("project_root"); dbErr == nil && dbRoot != "" {
+			altPath := filepath.Join(dbRoot, path)
+			if altContent, altErr := os.ReadFile(altPath); altErr == nil {
+				fmt.Fprintf(os.Stderr, "WARN: read_file_smart fallback — projectRoot mismatch, using DB root: %s\n", dbRoot)
+				content = altContent
+				fullPath = altPath
+				err = nil
+			}
+		}
+	}
 	if err != nil {
 		toolLog(meta, stage, "failed")
 		return mcp.NewToolResultError(toolFailure(meta, stage, fmt.Errorf("cannot read file %s: %w", path, err))), nil

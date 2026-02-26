@@ -95,6 +95,11 @@ CREATE TABLE IF NOT EXISTS file_hashes (
     hash       TEXT NOT NULL,
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE TABLE IF NOT EXISTS metadata (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 `
 
 // Open opens (or creates) the SQLite database at the given path.
@@ -191,4 +196,20 @@ func hasColumn(conn *sql.DB, table, column string) (bool, error) {
 		}
 	}
 	return false, rows.Err()
+}
+
+// SetMeta stores a key-value pair in the metadata table.
+func (db *DB) SetMeta(key, value string) error {
+	_, err := db.conn.Exec(`
+		INSERT INTO metadata (key, value) VALUES (?, ?)
+		ON CONFLICT(key) DO UPDATE SET value = excluded.value
+	`, key, value)
+	return err
+}
+
+// GetMeta retrieves a value from the metadata table.
+func (db *DB) GetMeta(key string) (string, error) {
+	var value string
+	err := db.conn.QueryRow(`SELECT value FROM metadata WHERE key = ?`, key).Scan(&value)
+	return value, err
 }
